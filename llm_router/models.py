@@ -1,6 +1,7 @@
 from pydantic import BaseModel
-from dataclasses import dataclass
 from typing import Any
+
+from .adapters.base import QuotaSnapshot, AdapterResponse  # canonical location
 
 
 # API request/response models
@@ -42,27 +43,3 @@ class JobStatus(BaseModel):
     created_at: str
     started_at: str | None
     completed_at: str | None
-
-
-# Internal dataclasses
-@dataclass
-class QuotaSnapshot:
-    rpm_limit: int | None = None
-    rpm_remaining: int | None = None
-    rpd_limit: int | None = None
-    rpd_remaining: int | None = None
-    tpm_limit: int | None = None
-    tpm_remaining: int | None = None
-    tpd_limit: int | None = None
-    tpd_remaining: int | None = None
-    reset_seconds: float | None = None
-
-
-@dataclass
-class AdapterResponse:
-    response: dict[str, Any]
-    quota: QuotaSnapshot | None
-    tokens_in: int
-    tokens_out: int
-    latency_ms: float
-    error: str | None = None
