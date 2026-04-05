@@ -1,0 +1,30 @@
+project: llm-router
+
+agents:
+  - id: manager
+    name: Sage
+    role: manager
+    model: claude-opus-4.6
+
+  - id: backend-1
+    name: Forge
+    role: backend
+    model: claude-sonnet-4
+    focus: "scaffold, config, db schema, CLI"
+
+  - id: backend-2
+    name: Anvil
+    role: backend
+    model: claude-sonnet-4
+    focus: "provider adapters, quota manager"
+
+  - id: backend-3
+    name: Bolt
+    role: backend
+    model: claude-sonnet-4
+    focus: "router, discovery, job queue, API surface"
+
+  - id: reviewer
+    name: Lens
+    role: reviewer
+    model: claude-sonnet-4
