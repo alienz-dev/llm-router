@@ -1,0 +1,28 @@
+[project]
+name = "llm-router"
+version = "0.1.0"
+description = "Free-Tier LLM Gateway"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi>=0.104.0",
+    "uvicorn[standard]>=0.24.0",
+    "aiosqlite>=0.19.0",
+    "httpx>=0.25.0",
+    "apscheduler>=3.10.0",
+    "pyyaml>=6.0",
+    "click>=8.1.0",
+    "pydantic>=2.5.0",
+]
+
+[project.scripts]
+llm-router = "llm_router.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=7.4.0",
+    "pytest-asyncio>=0.21.0",
+]

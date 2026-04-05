@@ -1,0 +1,67 @@
+server:
+  host: "0.0.0.0"
+  port: 8642
+
+database:
+  path: "llm_router.db"
+
+scheduler:
+  batch_window_start: "14:00"  # 00:00 AEST = 14:00 UTC
+  batch_window_end: "20:00"    # 06:00 AEST = 20:00 UTC
+  discovery_interval_hours: 6
+
+providers:
+  openrouter:
+    name: "OpenRouter"
+    base_url: "https://openrouter.ai/api/v1"
+    api_key_env: "OPENROUTER_API_KEY"
+    daily_reset_utc_hour: 0
+
+  google:
+    name: "Google AI Studio"
+    base_url: "https://generativelanguage.googleapis.com/v1beta"
+    api_key_env: "GOOGLE_AI_API_KEY"
+    daily_reset_utc_hour: 8
+
+  cerebras:
+    name: "Cerebras"
+    base_url: "https://api.cerebras.ai/v1"
+    api_key_env: "CEREBRAS_API_KEY"
+    daily_reset_utc_hour: 0
+
+  groq:
+    name: "Groq"
+    base_url: "https://api.groq.com/openai/v1"
+    api_key_env: "GROQ_API_KEY"
+    daily_reset_utc_hour: 0
+
+  mistral:
+    name: "Mistral"
+    base_url: "https://api.mistral.ai/v1"
+    api_key_env: "MISTRAL_API_KEY"
+    daily_reset_utc_hour: 0
+
+  nvidia:
+    name: "NVIDIA NIM"
+    base_url: "https://integrate.api.nvidia.com/v1"
+    api_key_env: "NVIDIA_API_KEY"
+    daily_reset_utc_hour: 0
+
+  kilo:
+    name: "Kilo Gateway"
+    base_url: "https://api.kilo.ai/v1"
+    api_key_env: "KILO_API_KEY"
+    daily_reset_utc_hour: 0
+
+  cloudflare:
+    name: "Cloudflare Workers AI"
+    base_url: "https://api.cloudflare.com/client/v4"
+    api_key_env: "CF_API_TOKEN"
+    account_id_env: "CF_ACCOUNT_ID"
+    daily_reset_utc_hour: 0
+
+  huggingface:
+    name: "Hugging Face"
+    base_url: "https://api-inference.huggingface.co"
+    api_key_env: "HF_API_TOKEN"
+    daily_reset_utc_hour: 0

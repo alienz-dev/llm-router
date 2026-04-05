@@ -29,10 +29,10 @@ CREATE TABLE IF NOT EXISTS models (
 
 CREATE TABLE IF NOT EXISTS quota_limits (
     provider_id TEXT NOT NULL,
-    model_id TEXT,  -- NULL = provider-level limit
+    model_id TEXT NOT NULL DEFAULT '',
     rpm INTEGER, rph INTEGER, rpd INTEGER,
     tpm INTEGER, tph INTEGER, tpd INTEGER,
-    PRIMARY KEY (provider_id, COALESCE(model_id, ''))
+    PRIMARY KEY (provider_id, model_id)
 );
 
 CREATE TABLE IF NOT EXISTS quota_usage (
