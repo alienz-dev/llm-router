@@ -12,21 +12,24 @@ class HuggingFaceAdapter(BaseAdapter):
     def __init__(self, api_token: str):
         self.api_token = api_token
         self.base_url = "https://api-inference.huggingface.co/models"
+        self.client = httpx.AsyncClient(timeout=30)
     
     async def _retry_with_backoff(self, func, *args, **kwargs):
         for attempt in range(3):
             try:
                 return await func(*args, **kwargs)
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429 and attempt < 2:
+                if e.response.status_code in (429, 503) and attempt < 2:
                     wait = (2 ** attempt) + random.uniform(0, 1)
                     await asyncio.sleep(wait)
                     continue
                 return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
-            except Exception as e:
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
                 if attempt < 2:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
                     continue
+                return {"error": str(e)}
+            except Exception as e:
                 return {"error": str(e)}
     
     def _parse_quota(self, headers) -> QuotaSnapshot:
@@ -77,16 +80,14 @@ class HuggingFaceAdapter(BaseAdapter):
         start_time = time.time()
         
         async def _make_request():
-            async with httpx.AsyncClient() as client:
-                hf_payload = self._convert_to_hf_format(messages)
-                response = await client.post(
-                    f"{self.base_url}/{model_id}",
-                    headers={"Authorization": f"Bearer {self.api_token}"},
-                    json=hf_payload,
-                    timeout=30
-                )
-                response.raise_for_status()
-                return response
+            hf_payload = self._convert_to_hf_format(messages)
+            response = await self.client.post(
+                f"{self.base_url}/{model_id}",
+                headers={"Authorization": f"Bearer {self.api_token}"},
+                json=hf_payload,
+            )
+            response.raise_for_status()
+            return response
         
         result = await self._retry_with_backoff(_make_request)
         if isinstance(result, dict) and "error" in result:
@@ -108,10 +109,11 @@ class HuggingFaceAdapter(BaseAdapter):
         # HuggingFace doesn't support streaming - fallback to non-streaming
         result = await self.chat_completion(messages, model_id, **kwargs)
         if "error" in result.response:
-            yield json.dumps(result.response)
+            yield str(result.response.get("error", "Unknown error"))
         else:
             content = result.response.get("choices", [{}])[0].get("message", {}).get("content", "")
-            yield json.dumps({"choices": [{"delta": {"content": content}}]})
+            if content:
+                yield content
     
     async def list_models(self) -> list[dict]:
         # HuggingFace has many models - return popular free ones
@@ -121,3 +123,6 @@ class HuggingFaceAdapter(BaseAdapter):
             {"id": "microsoft/DialoGPT-small", "object": "model"},
             {"id": "gpt2", "object": "model"}
         ]
+
+    async def close(self):
+        await self.client.aclose()

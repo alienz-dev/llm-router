@@ -12,21 +12,24 @@ class OpenRouterAdapter(BaseAdapter):
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.base_url = "https://openrouter.ai/api/v1"
+        self.client = httpx.AsyncClient(timeout=30)
     
     async def _retry_with_backoff(self, func, *args, **kwargs):
         for attempt in range(3):
             try:
                 return await func(*args, **kwargs)
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429 and attempt < 2:
+                if e.response.status_code in (429, 503) and attempt < 2:
                     wait = (2 ** attempt) + random.uniform(0, 1)
                     await asyncio.sleep(wait)
                     continue
                 return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
-            except Exception as e:
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
                 if attempt < 2:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
                     continue
+                return {"error": str(e)}
+            except Exception as e:
                 return {"error": str(e)}
     
     def _parse_quota(self, headers) -> QuotaSnapshot:
@@ -42,15 +45,13 @@ class OpenRouterAdapter(BaseAdapter):
         start_time = time.time()
         
         async def _make_request():
-            async with httpx.AsyncClient() as client:
-                response = await client.post(
-                    f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json={"messages": messages, "model": model_id, **kwargs},
-                    timeout=30
-                )
-                response.raise_for_status()
-                return response
+            response = await self.client.post(
+                f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={"messages": messages, "model": model_id, **kwargs},
+            )
+            response.raise_for_status()
+            return response
         
         result = await self._retry_with_backoff(_make_request)
         if isinstance(result, dict) and "error" in result:
@@ -68,35 +69,35 @@ class OpenRouterAdapter(BaseAdapter):
         )
     
     async def stream_completion(self, messages: list[dict], model_id: str, **kwargs) -> AsyncIterator[str]:
-        async def _make_request():
-            async with httpx.AsyncClient() as client:
-                async with client.stream(
-                    "POST",
-                    f"{self.base_url}/chat/completions",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    json={"messages": messages, "model": model_id, "stream": True, **kwargs},
-                    timeout=30
-                ) as response:
-                    response.raise_for_status()
-                    async for line in response.aiter_lines():
-                        if line.startswith("data: "):
-                            yield line[6:]
-        
         try:
-            async for chunk in _make_request():
-                yield chunk
+            async with self.client.stream(
+                "POST", f"{self.base_url}/chat/completions",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                json={"messages": messages, "model": model_id, "stream": True, **kwargs},
+            ) as response:
+                response.raise_for_status()
+                async for line in response.aiter_lines():
+                    if line.startswith("data: ") and line.strip() != "data: [DONE]":
+                        try:
+                            chunk = json.loads(line[6:])
+                            content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
+                            if content:
+                                yield content
+                        except json.JSONDecodeError:
+                            continue
         except Exception as e:
-            yield json.dumps({"error": str(e)})
+            yield str(e)
     
     async def list_models(self) -> list[dict]:
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.base_url}/models",
-                    headers={"Authorization": f"Bearer {self.api_key}"},
-                    timeout=10
-                )
-                response.raise_for_status()
-                return response.json().get("data", [])
+            response = await self.client.get(
+                f"{self.base_url}/models",
+                headers={"Authorization": f"Bearer {self.api_key}"},
+            )
+            response.raise_for_status()
+            return response.json().get("data", [])
         except Exception:
             return []
+
+    async def close(self):
+        await self.client.aclose()

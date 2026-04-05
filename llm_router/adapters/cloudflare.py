@@ -13,21 +13,24 @@ class CloudflareAdapter(BaseAdapter):
         self.account_id = account_id
         self.api_token = api_token
         self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run"
+        self.client = httpx.AsyncClient(timeout=30)
     
     async def _retry_with_backoff(self, func, *args, **kwargs):
         for attempt in range(3):
             try:
                 return await func(*args, **kwargs)
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429 and attempt < 2:
+                if e.response.status_code in (429, 503) and attempt < 2:
                     wait = (2 ** attempt) + random.uniform(0, 1)
                     await asyncio.sleep(wait)
                     continue
                 return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
-            except Exception as e:
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
                 if attempt < 2:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
                     continue
+                return {"error": str(e)}
+            except Exception as e:
                 return {"error": str(e)}
     
     def _parse_quota(self, headers) -> QuotaSnapshot:
@@ -67,16 +70,14 @@ class CloudflareAdapter(BaseAdapter):
         start_time = time.time()
         
         async def _make_request():
-            async with httpx.AsyncClient() as client:
-                cf_payload = self._convert_to_cf_format(messages)
-                response = await client.post(
-                    f"{self.base_url}/@cf/{model_id}",
-                    headers={"Authorization": f"Bearer {self.api_token}"},
-                    json=cf_payload,
-                    timeout=30
-                )
-                response.raise_for_status()
-                return response
+            cf_payload = self._convert_to_cf_format(messages)
+            response = await self.client.post(
+                f"{self.base_url}/@cf/{model_id}",
+                headers={"Authorization": f"Bearer {self.api_token}"},
+                json=cf_payload,
+            )
+            response.raise_for_status()
+            return response
         
         result = await self._retry_with_backoff(_make_request)
         if isinstance(result, dict) and "error" in result:
@@ -98,10 +99,11 @@ class CloudflareAdapter(BaseAdapter):
         # Cloudflare doesn't support streaming - fallback to non-streaming
         result = await self.chat_completion(messages, model_id, **kwargs)
         if "error" in result.response:
-            yield json.dumps(result.response)
+            yield str(result.response.get("error", "Unknown error"))
         else:
             content = result.response.get("choices", [{}])[0].get("message", {}).get("content", "")
-            yield json.dumps({"choices": [{"delta": {"content": content}}]})
+            if content:
+                yield content
     
     async def list_models(self) -> list[dict]:
         # Cloudflare models are predefined - return common ones
@@ -110,3 +112,6 @@ class CloudflareAdapter(BaseAdapter):
             {"id": "mistral-7b-instruct-v0.1", "object": "model"},
             {"id": "codellama-7b-instruct-awq", "object": "model"}
         ]
+
+    async def close(self):
+        await self.client.aclose()

@@ -71,6 +71,9 @@ async def lifespan(app: FastAPI):
     yield
 
     await _scheduler.stop()
+    # Close all adapter clients
+    for adapter in adapters.values():
+        await adapter.close()
     await close_db()
 
 

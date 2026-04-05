@@ -12,6 +12,12 @@ class DatabaseConfig(BaseModel):
     path: str = "llm_router.db"
 
 
+class SchedulerConfig(BaseModel):
+    batch_window_start: str = "14:00"
+    batch_window_end: str = "20:00"
+    discovery_interval_hours: int = 6
+
+
 class ProviderConfig(BaseModel):
     name: str
     base_url: str
@@ -23,6 +29,7 @@ class ProviderConfig(BaseModel):
 class Config(BaseModel):
     server: ServerConfig = ServerConfig()
     database: DatabaseConfig = DatabaseConfig()
+    scheduler: SchedulerConfig = SchedulerConfig()
     providers: dict[str, ProviderConfig] = {}
 
 

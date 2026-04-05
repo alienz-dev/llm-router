@@ -12,21 +12,24 @@ class GoogleAdapter(BaseAdapter):
     def __init__(self, api_key: str):
         self.api_key = api_key
         self.base_url = "https://generativelanguage.googleapis.com/v1beta"
+        self.client = httpx.AsyncClient(timeout=30)
     
     async def _retry_with_backoff(self, func, *args, **kwargs):
         for attempt in range(3):
             try:
                 return await func(*args, **kwargs)
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429 and attempt < 2:
+                if e.response.status_code in (429, 503) and attempt < 2:
                     wait = (2 ** attempt) + random.uniform(0, 1)
                     await asyncio.sleep(wait)
                     continue
                 return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
-            except Exception as e:
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
                 if attempt < 2:
-                    await asyncio.sleep(1)
+                    await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
                     continue
+                return {"error": str(e)}
+            except Exception as e:
                 return {"error": str(e)}
     
     def _parse_quota(self, headers) -> QuotaSnapshot:
@@ -34,11 +37,18 @@ class GoogleAdapter(BaseAdapter):
         return None
     
     def _convert_to_google_format(self, messages: list[dict]) -> dict:
+        system_parts = []
         contents = []
         for msg in messages:
-            role = "user" if msg["role"] == "user" else "model"
-            contents.append({"role": role, "parts": [{"text": msg["content"]}]})
-        return {"contents": contents}
+            if msg["role"] == "system":
+                system_parts.append({"text": msg["content"]})
+            else:
+                role = "user" if msg["role"] == "user" else "model"
+                contents.append({"role": role, "parts": [{"text": msg["content"]}]})
+        payload = {"contents": contents}
+        if system_parts:
+            payload["system_instruction"] = {"parts": system_parts}
+        return payload
     
     def _convert_from_google_format(self, response: dict) -> dict:
         candidates = response.get("candidates", [])
@@ -64,15 +74,13 @@ class GoogleAdapter(BaseAdapter):
         start_time = time.time()
         
         async def _make_request():
-            async with httpx.AsyncClient() as client:
-                google_payload = self._convert_to_google_format(messages)
-                response = await client.post(
-                    f"{self.base_url}/models/{model_id}:generateContent?key={self.api_key}",
-                    json=google_payload,
-                    timeout=30
-                )
-                response.raise_for_status()
-                return response
+            google_payload = self._convert_to_google_format(messages)
+            response = await self.client.post(
+                f"{self.base_url}/models/{model_id}:generateContent?key={self.api_key}",
+                json=google_payload,
+            )
+            response.raise_for_status()
+            return response
         
         result = await self._retry_with_backoff(_make_request)
         if isinstance(result, dict) and "error" in result:
@@ -94,20 +102,22 @@ class GoogleAdapter(BaseAdapter):
         # Google streaming requires different endpoint - simplified non-streaming for now
         result = await self.chat_completion(messages, model_id, **kwargs)
         if "error" in result.response:
-            yield json.dumps(result.response)
+            yield str(result.response.get("error", "Unknown error"))
         else:
             content = result.response.get("choices", [{}])[0].get("message", {}).get("content", "")
-            yield json.dumps({"choices": [{"delta": {"content": content}}]})
+            if content:
+                yield content
     
     async def list_models(self) -> list[dict]:
         try:
-            async with httpx.AsyncClient() as client:
-                response = await client.get(
-                    f"{self.base_url}/models?key={self.api_key}",
-                    timeout=10
-                )
-                response.raise_for_status()
-                models = response.json().get("models", [])
-                return [{"id": m["name"].split("/")[-1], "object": "model"} for m in models]
+            response = await self.client.get(
+                f"{self.base_url}/models?key={self.api_key}",
+            )
+            response.raise_for_status()
+            models = response.json().get("models", [])
+            return [{"id": m["name"].split("/")[-1], "object": "model"} for m in models]
         except Exception:
             return []
+
+    async def close(self):
+        await self.client.aclose()

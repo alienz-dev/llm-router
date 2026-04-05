@@ -37,3 +37,6 @@ class BaseAdapter(ABC):
 
     @abstractmethod
     async def list_models(self) -> list[dict]: ...
+
+    @abstractmethod
+    async def close(self): ...
