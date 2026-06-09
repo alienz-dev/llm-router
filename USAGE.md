@@ -10,7 +10,7 @@ LLM Router is a self-hosted gateway that aggregates free-tier LLM providers behi
 ## Installation
 
 ```bash
-git clone <repo-url>
+git clone https://github.com/alienz-dev/llm-router.git
 cd llm-router
 uv sync
 cp .env.example .env

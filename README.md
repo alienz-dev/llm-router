@@ -46,7 +46,7 @@ HTTP API (FastAPI :8642)
 
 ```bash
 # 1. Clone and install
-git clone <repo-url> && cd llm-router
+git clone https://github.com/alienz-dev/llm-router.git && cd llm-router
 uv sync
 
 # 2. Configure API keys
