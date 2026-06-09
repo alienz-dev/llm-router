@@ -1,5 +1,0 @@
-# Living state — not version controlled
-workspace/
-results/
-# Briefings are generated, not tracked
-briefings/

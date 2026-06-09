@@ -1,10 +1,13 @@
 """Job queue manager for batch processing."""
 import asyncio
 import json
+import logging
 import uuid
 from datetime import datetime, timezone
 
 from .db import get_db
+
+logger = logging.getLogger(__name__)
 
 
 class JobQueue:
@@ -83,8 +86,8 @@ class JobQueue:
             try:
                 await self._process_job(job_id)
                 processed += 1
-            except Exception:
-                pass
+            except Exception as e:
+                logger.error("Failed to process job %s: %s", job_id, e)
         return processed
 
     async def _process_job(self, job_id: str) -> None:
@@ -134,7 +137,8 @@ class JobQueue:
             )
             await db.commit()
 
-        except Exception:
+        except Exception as e:
+            logger.error("Job %s failed (attempt %d): %s", job_id, retries + 1, e)
             if retries < 3:
                 await db.execute(
                     "UPDATE jobs SET retries = retries + 1, status = 'pending' WHERE id = ?",

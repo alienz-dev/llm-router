@@ -29,7 +29,7 @@ class QuotaManager:
         self, provider: str, model_id: str, estimated_tokens: int
     ) -> bool:
         """Check RPM + TPM against sliding window usage AND known limits.
-        Factors in estimated_tokens + expected completion (default 1024)."""
+        Uses a single query for all usage data instead of 4 separate queries."""
         db = await get_db()
         now = datetime.now(timezone.utc)
         limits = await self._get_limits(provider, model_id)
@@ -41,7 +41,7 @@ class QuotaManager:
             "SELECT daily_reset_utc_hour FROM providers WHERE id = ?", (provider,)
         ) as cursor:
             row = await cursor.fetchone()
-            reset_hour = row[0] if row else 0
+        reset_hour = row[0] if row else 0
 
         daily_start = now.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
         if now.hour < reset_hour:
@@ -49,44 +49,41 @@ class QuotaManager:
 
         minute_ago = (now - timedelta(minutes=1)).isoformat()
         daily_iso = daily_start.isoformat()
-        expected_completion = 1024
-        total_estimated = estimated_tokens + expected_completion
+        total_estimated = estimated_tokens + 1024  # expected completion
 
+        # Single query: get minute + daily usage in one shot
         usage_q = """
-            SELECT COUNT(*), COALESCE(SUM(tokens_in + tokens_out), 0)
+            SELECT
+                SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END) AS rpm_count,
+                SUM(CASE WHEN timestamp >= ? THEN tokens_in + tokens_out ELSE 0 END) AS tpm_used,
+                SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END) AS rpd_count,
+                SUM(CASE WHEN timestamp >= ? THEN tokens_in + tokens_out ELSE 0 END) AS tpd_used
             FROM quota_usage
-            WHERE provider_id = ? AND model_id = ? AND timestamp >= ? AND success = 1
+            WHERE provider_id = ? AND model_id = ? AND success = 1
+              AND timestamp >= ?
         """
+        async with db.execute(
+            usage_q,
+            (minute_ago, minute_ago, daily_iso, daily_iso,
+             provider, model_id, daily_iso),
+        ) as cur:
+            row = await cur.fetchone()
 
-        # RPM check
-        if limits.get("rpm"):
-            async with db.execute(usage_q, (provider, model_id, minute_ago)) as cur:
-                row = await cur.fetchone()
-                if row and row[0] >= limits["rpm"]:
-                    return False
+        if not row:
+            return True
 
-        # TPM check
-        if limits.get("tpm"):
-            async with db.execute(usage_q, (provider, model_id, minute_ago)) as cur:
-                row = await cur.fetchone()
-                tpm_used = row[1] if row else 0
-                if tpm_used + total_estimated > limits["tpm"]:
-                    return False
+        rpm_count, tpm_used, rpd_count, tpd_used = (
+            row[0] or 0, row[1] or 0, row[2] or 0, row[3] or 0
+        )
 
-        # RPD check
-        if limits.get("rpd"):
-            async with db.execute(usage_q, (provider, model_id, daily_iso)) as cur:
-                row = await cur.fetchone()
-                if row and row[0] >= limits["rpd"]:
-                    return False
-
-        # TPD check
-        if limits.get("tpd"):
-            async with db.execute(usage_q, (provider, model_id, daily_iso)) as cur:
-                row = await cur.fetchone()
-                tpd_used = row[1] if row else 0
-                if tpd_used + total_estimated > limits["tpd"]:
-                    return False
+        if limits.get("rpm") and rpm_count >= limits["rpm"]:
+            return False
+        if limits.get("tpm") and tpm_used + total_estimated > limits["tpm"]:
+            return False
+        if limits.get("rpd") and rpd_count >= limits["rpd"]:
+            return False
+        if limits.get("tpd") and tpd_used + total_estimated > limits["tpd"]:
+            return False
 
         return True
 

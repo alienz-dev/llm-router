@@ -4,10 +4,11 @@ After=network.target
 
 [Service]
 Type=exec
-User=mingl
-WorkingDirectory=/home/mingl/work-enhancement/llm-router
-EnvironmentFile=/home/mingl/work-enhancement/llm-router/.env
-ExecStart=/home/mingl/.local/bin/uv run llm-router serve
+# TODO: Replace with your username and install path
+User=llm-router
+WorkingDirectory=/opt/llm-router
+EnvironmentFile=/opt/llm-router/.env
+ExecStart=/usr/local/bin/uv run llm-router serve
 Restart=always
 RestartSec=5
 StandardOutput=journal

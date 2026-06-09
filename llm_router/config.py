@@ -1,6 +1,10 @@
 import yaml
 from pathlib import Path
 from pydantic import BaseModel
+from dotenv import load_dotenv
+
+# Load .env into os.environ before any os.getenv() calls
+load_dotenv(Path(__file__).parent.parent / ".env")
 
 
 class ServerConfig(BaseModel):
@@ -24,6 +28,8 @@ class ProviderConfig(BaseModel):
     api_key_env: str
     daily_reset_utc_hour: int = 0
     account_id_env: str | None = None
+    priority: float = 1.0
+    timeout: int = 30
 
 
 class Config(BaseModel):

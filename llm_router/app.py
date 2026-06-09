@@ -1,12 +1,14 @@
 """FastAPI application with all routes."""
 import json
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Response
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import HTMLResponse, StreamingResponse
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from .adapters import ADAPTERS
 from .db import get_db, close_db
@@ -15,6 +17,29 @@ from .quota import QuotaManager
 from .queue import JobQueue
 from .router import SmartRouter
 from .scheduler import AppScheduler
+
+logger = logging.getLogger(__name__)
+
+
+class APIKeyMiddleware(BaseHTTPMiddleware):
+    """Optional bearer token auth. If API_KEY env var is set, require it in requests.
+    Health endpoint is always exempt."""
+
+    def __init__(self, app, api_key: str):
+        super().__init__(app)
+        self.api_key = api_key
+
+    async def dispatch(self, request: Request, call_next):
+        # Always allow health check
+        if request.url.path == "/health":
+            return await call_next(request)
+        auth = request.headers.get("authorization", "")
+        if auth == f"Bearer {self.api_key}":
+            return await call_next(request)
+        # Also allow query param for SSE clients that can't set headers
+        if request.query_params.get("key") == self.api_key:
+            return await call_next(request)
+        return Response(content='{"error":{"message":"Invalid API key","type":"auth_error"}}', status_code=401, media_type="application/json")
 
 # --- Globals wired in lifespan ---
 _router: SmartRouter | None = None
@@ -31,13 +56,20 @@ def _build_adapters() -> dict:
     for pid, pcfg in cfg.providers.items():
         key = os.getenv(pcfg.api_key_env, "")
         if not key:
+            logger.warning("Skipping provider %s: %s not set", pid, pcfg.api_key_env)
             continue
         if pid == "cloudflare":
             acct = os.getenv(pcfg.account_id_env or "", "")
             if acct:
                 adapters[pid] = ADAPTERS[pid](acct, key)
+            else:
+                logger.warning("Skipping provider cloudflare: %s not set", pcfg.account_id_env)
         elif pid in ADAPTERS:
             adapters[pid] = ADAPTERS[pid](key)
+    if not adapters:
+        logger.error("No providers configured! Set API keys in .env")
+    else:
+        logger.info("Initialized %d provider adapters: %s", len(adapters), ", ".join(adapters.keys()))
     return adapters
 
 
@@ -64,6 +96,8 @@ async def lifespan(app: FastAPI):
     adapters = _build_adapters()
     _quota = QuotaManager()
     _router = SmartRouter(adapters, _quota)
+    # Restore circuit breaker state from previous run
+    await _router.circuit_breaker.load_state()
     _queue = JobQueue(_router)
     _scheduler = AppScheduler(_queue)
     await _scheduler.start()
@@ -79,6 +113,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="LLM Router", version="0.1.0", lifespan=lifespan)
 
+# Optional API key auth — set API_KEY env var to enable
+_api_key = os.getenv("API_KEY", "")
+if _api_key:
+    app.add_middleware(APIKeyMiddleware, api_key=_api_key)
+    logger.info("API key auth enabled")
+else:
+    logger.info("API key auth disabled (set API_KEY env var to enable)")
+
 
 # ── Health ──────────────────────────────────────────────
 @app.get("/health")
@@ -91,20 +133,39 @@ async def health():
 async def chat_completions(req: ChatCompletionRequest, response: Response):
     messages = [m.model_dump() for m in req.messages]
 
+    # Build kwargs from request params that should flow through to adapters
+    extra_kwargs = {}
+    if req.max_tokens is not None:
+        extra_kwargs["max_tokens"] = req.max_tokens
+    if req.temperature is not None:
+        extra_kwargs["temperature"] = req.temperature
+
     if req.stream:
-        stream_iter = await _router.route(messages, model_override=req.model, stream=True)
+        stream_iter = await _router.route(
+            messages, model_override=req.model, stream=True, **extra_kwargs,
+        )
         return StreamingResponse(
             _sse_wrap(stream_iter, req.model or "auto"),
             media_type="text/event-stream",
         )
 
-    result = await _router.route(messages, model_override=req.model, stream=False)
+    result = await _router.route(
+        messages, model_override=req.model, stream=False, **extra_kwargs,
+    )
     if "error" in result.response:
-        raise HTTPException(status_code=502, detail=result.response["error"])
+        from .models import error_response
+        raise HTTPException(
+            status_code=502,
+            detail=error_response(result.response["error"], "upstream_error"),
+        )
 
     meta = result.response.pop("_router", {})
     response.headers["x-llm-router-provider"] = meta.get("provider", "unknown")
     response.headers["x-llm-router-model"] = meta.get("model", req.model or "auto")
+    if meta.get("fallback"):
+        response.headers["x-llm-router-fallback"] = "true"
+        if meta.get("original_request"):
+            response.headers["x-llm-router-original-model"] = meta["original_request"]
     return result.response
 
 
@@ -150,6 +211,56 @@ async def get_quota():
     return {"providers": await _quota.get_all_quota_status()}
 
 
+# ── Provider Health (circuit breaker status) ────────────
+@app.get("/v1/providers/health")
+async def provider_health():
+    """Circuit breaker status for all providers. Consumers can check this
+    to see which providers are available before making requests."""
+    breaker_status = _router.circuit_breaker.get_all_status()
+    quota_status = await _quota.get_all_quota_status()
+    quota_map = {q["provider_id"]: q for q in quota_status}
+
+    providers = {}
+    for pid, bstate in breaker_status.items():
+        providers[pid] = {
+            **bstate,
+            "quota": quota_map.get(pid, {}),
+            "available": bstate["state"] == "closed" and (
+                quota_map.get(pid, {}).get("healthy", True)
+            ),
+        }
+    return {"providers": providers}
+
+
+# ── Model Health ────────────────────────────────────────
+@app.get("/v1/models/health")
+async def model_health():
+    """Per-model availability and health data."""
+    db = await get_db()
+    async with db.execute("""
+        SELECT mh.provider_id, mh.model_id, mh.last_probe_at, mh.last_probe_ok,
+               mh.last_probe_latency_ms, mh.last_probe_error,
+               mh.consecutive_failures, mh.avg_latency_ms,
+               mh.success_count, mh.failure_count, m.display_name
+        FROM model_health mh
+        JOIN models m ON mh.provider_id = m.provider_id AND mh.model_id = m.model_id
+        ORDER BY mh.success_count DESC
+    """) as cur:
+        rows = await cur.fetchall()
+    models = []
+    for r in rows:
+        total = (r[7] or 0) + (r[8] or 0)
+        models.append({
+            "provider_id": r[0], "model_id": r[1], "display_name": r[10],
+            "last_probe_at": r[2], "last_probe_ok": bool(r[3]),
+            "last_probe_latency_ms": r[4], "last_probe_error": r[5],
+            "consecutive_failures": r[6], "avg_latency_ms": r[7],
+            "success_count": r[8], "failure_count": r[9],
+            "success_rate": round(r[8] / total, 3) if total > 0 else None,
+        })
+    return {"models": models}
+
+
 # ── Dashboard ───────────────────────────────────────────
 @app.get("/dashboard")
 async def dashboard():
@@ -159,10 +270,36 @@ async def dashboard():
     async with db.execute("SELECT status, COUNT(*) FROM jobs GROUP BY status") as cur:
         job_counts = {r[0]: r[1] for r in await cur.fetchall()}
     quota_status = await _quota.get_all_quota_status()
+    breaker_status = _router.circuit_breaker.get_all_status()
+
+    # Top models by health
+    async with db.execute("""
+        SELECT mh.provider_id, mh.model_id, mh.avg_latency_ms,
+               mh.success_count, mh.failure_count, mh.consecutive_failures,
+               mh.last_probe_ok
+        FROM model_health mh
+        JOIN models m ON mh.provider_id = m.provider_id AND mh.model_id = m.model_id
+        WHERE m.active = 1
+        ORDER BY mh.success_count DESC LIMIT 20
+    """) as cur:
+        health_rows = await cur.fetchall()
+    top_models = []
+    for r in health_rows:
+        total = (r[3] or 0) + (r[4] or 0)
+        top_models.append({
+            "provider_id": r[0], "model_id": r[1],
+            "avg_latency_ms": round(r[2], 1) if r[2] else None,
+            "success_rate": round(r[3] / total, 3) if total > 0 else None,
+            "consecutive_failures": r[5],
+            "last_probe_ok": bool(r[6]),
+        })
+
     return {
         "active_models": model_count,
         "jobs": job_counts,
         "providers": quota_status,
+        "circuit_breakers": breaker_status,
+        "top_models_health": top_models,
     }
 
 

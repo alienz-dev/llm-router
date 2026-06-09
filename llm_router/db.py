@@ -86,6 +86,29 @@ async def _init_schema(db: aiosqlite.Connection):
             latency_ms REAL
         );
 
+        CREATE TABLE IF NOT EXISTS model_health (
+            provider_id TEXT NOT NULL,
+            model_id TEXT NOT NULL,
+            last_probe_at TEXT,
+            last_probe_ok INTEGER DEFAULT 0,
+            last_probe_latency_ms REAL,
+            last_probe_error TEXT,
+            consecutive_failures INTEGER DEFAULT 0,
+            avg_latency_ms REAL,
+            success_count INTEGER DEFAULT 0,
+            failure_count INTEGER DEFAULT 0,
+            PRIMARY KEY (provider_id, model_id)
+        );
+
+        CREATE TABLE IF NOT EXISTS circuit_breaker_state (
+            provider_id TEXT PRIMARY KEY,
+            state TEXT NOT NULL DEFAULT 'closed',
+            failure_count INTEGER DEFAULT 0,
+            last_failure_at TEXT,
+            last_error TEXT,
+            updated_at TEXT NOT NULL
+        );
+
         CREATE INDEX IF NOT EXISTS idx_quota_usage_ts ON quota_usage(provider_id, timestamp);
         CREATE INDEX IF NOT EXISTS idx_jobs_status ON jobs(status, priority, created_at);
         CREATE INDEX IF NOT EXISTS idx_models_active ON models(active, provider_id);

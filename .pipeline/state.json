@@ -1,0 +1,17 @@
+{
+  "stage": "plan",
+  "feature": "refactoring-and-features",
+  "created": "2026-06-09",
+  "phases": {
+    "1_adapter_dedup": "pending",
+    "2_health_repository": "pending",
+    "3_discovery_helper": "pending",
+    "4_quota_n1_fix": "pending",
+    "5_quota_cleanup": "pending",
+    "6_forward_params": "pending",
+    "7_configurable_priority": "pending",
+    "8_auth_middleware": "pending",
+    "9_error_standardization": "pending",
+    "10_exception_logging": "pending"
+  }
+}

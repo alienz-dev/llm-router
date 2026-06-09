@@ -1,6 +1,6 @@
 # LLM Router — Usage Guide
 
-LLM Router is a self-hosted gateway that aggregates 9 free-tier LLM providers behind a single OpenAI-compatible API. It classifies incoming requests by task type (code, reasoning, summarization, general), scores available models by capability and remaining quota, and routes to the best option — with automatic fallback if a provider is rate-limited or down.
+LLM Router is a self-hosted gateway that aggregates free-tier LLM providers behind a single OpenAI-compatible API. It classifies incoming requests by task type (code, reasoning, summarization, general), scores available models by capability, quota headroom, and real-time availability, and routes to the best option — with automatic fallback if a provider is rate-limited or down.
 
 ## Prerequisites
 
@@ -10,13 +10,13 @@ LLM Router is a self-hosted gateway that aggregates 9 free-tier LLM providers be
 ## Installation
 
 ```bash
-git clone git@bitbucket.org:mingxiali/llm-router.git
+git clone <repo-url>
 cd llm-router
 uv sync
 cp .env.example .env
 ```
 
-Edit `.env` and add API keys for the providers you want to use. You don't need all 9 — the router works with whatever providers are configured.
+Edit `.env` and add API keys for the providers you want to use. You don't need all 11 — the router works with whatever providers are configured.
 
 ## Provider Setup
 
@@ -67,6 +67,16 @@ Each provider offers a free tier. Sign up and get an API key:
 1. Sign up at [huggingface.co](https://huggingface.co)
 2. Go to **Settings** → **Access Tokens** → **New token** (read permission is sufficient)
 3. Set `HF_API_TOKEN` in `.env`
+
+### DeepSeek
+1. Sign up at [platform.deepseek.com](https://platform.deepseek.com)
+2. Go to **API Keys** → **Create API Key**
+3. Set `DEEPSEEK_API_KEY` in `.env`
+
+### OpenCode Z
+1. Sign up at [opencode.ai](https://opencode.ai)
+2. Get API key from the dashboard
+3. Set `OPENCODE_API_KEY` in `.env`
 
 ## Configuration
 
@@ -251,19 +261,31 @@ llm-router process
 
 2. **Candidate Scoring** — for each active model, the router computes:
    ```
-   score = capability_score × (quota_headroom + 0.1)
+   score = capability_score × (quota_headroom + 0.1) × availability × provider_priority
    ```
    - `capability_score` — per-model, per-task score from discovery (0–1)
    - `quota_headroom` — percentage of remaining quota for that provider (0–1)
+   - `availability` — freshness × success_rate × latency_penalty (see below)
+   - `provider_priority` — per-provider multiplier (openrouter=1.2, nvidia=1.1, etc.)
 
-3. **Groq Penalty** — Groq has tight TPM limits. If the estimated token count exceeds 30% of the model's TPM limit, the score is penalized proportionally. This prevents Groq from being selected for long prompts.
+3. **Availability Tracking** — every request and probe updates per-model health data:
+   - **Freshness**: 1.0 if probed <2h ago, decaying to 0.1 after 24h
+   - **Success rate**: rolling `success_count / total`, penalized 5x if 3+ consecutive failures
+   - **Latency penalty**: 0.8 if >5s avg, 0.5 if >10s avg
+   - **Hard skip**: models with 5+ consecutive failures are excluded entirely
 
-4. **Fallback Chain** — candidates are sorted by score. The router tries the top candidate first. On failure (rate limit, timeout, error), it falls back to the next candidate. All providers are tried before returning an error.
+4. **Groq Penalty** — Groq has tight TPM limits. If the estimated token count exceeds 30% of the model's TPM limit, the score is penalized proportionally. This prevents Groq from being selected for long prompts.
+
+5. **Fallback Chain** — candidates are sorted by score. The router tries the top candidate first. On failure (rate limit, timeout, error), it falls back to the next candidate. All providers are tried before returning an error.
+
+6. **Circuit Breaker** — per-provider circuit breaker with 3 states (CLOSED/OPEN/HALF_OPEN). Trips after 5 failures in 60s, auto-recovers after 30s cooldown. State is persisted to DB across restarts.
 
 ## Monitoring
 
-- **Dashboard**: `http://localhost:8642/dashboard` — web UI showing provider status, recent requests, quota usage
+- **Dashboard**: `http://localhost:8642/dashboard` — JSON with provider status, job counts, top models health, circuit breakers
 - **Quota API**: `GET /v1/quota` — JSON quota status for all providers
+- **Provider Health**: `GET /v1/providers/health` — circuit breaker + quota combined status
+- **Model Health**: `GET /v1/models/health` — per-model availability, latency, success rate
 - **Health**: `GET /health` — basic health check
 - **CLI**: `llm-router status` — terminal-friendly quota table
 
@@ -283,12 +305,14 @@ llm-router process
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `POST` | `/v1/chat/completions` | Chat completion (OpenAI-compatible) |
-| `GET` | `/v1/models` | List available models |
+| `POST` | `/v1/chat/completions` | Chat completion (OpenAI-compatible, sync + streaming) |
+| `GET` | `/v1/models` | List active free models |
+| `GET` | `/v1/models/health` | Per-model availability, latency, success rate |
 | `GET` | `/v1/quota` | Quota status for all providers |
+| `GET` | `/v1/providers/health` | Circuit breaker + quota combined status |
 | `GET` | `/health` | Health check |
-| `GET` | `/dashboard` | Web dashboard |
-| `POST` | `/jobs` | Submit batch job |
+| `GET` | `/dashboard` | System dashboard (models, jobs, quota, health) |
+| `POST` | `/jobs` | Submit batch/immediate job |
 | `GET` | `/jobs/{id}` | Get job status |
 | `GET` | `/jobs/{id}/result` | Get job result |
 | `POST` | `/jobs/process` | Trigger batch processing |

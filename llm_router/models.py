@@ -4,6 +4,14 @@ from typing import Any
 from .adapters.base import QuotaSnapshot, AdapterResponse  # canonical location
 
 
+def error_response(message: str, error_type: str = "server_error", code: str | None = None) -> dict:
+    """Standardized OpenAI-compatible error response."""
+    err = {"message": message, "type": error_type}
+    if code:
+        err["code"] = code
+    return {"error": err}
+
+
 # API request/response models
 class ChatMessage(BaseModel):
     role: str

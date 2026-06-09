@@ -1,0 +1,14 @@
+pre-commit:
+  parallel: true
+  commands:
+    ruff:
+      glob: "*.py"
+      run: uv run ruff check --fix {staged_files}
+      stage_fixed: true
+    ruff-format:
+      glob: "*.py"
+      run: uv run ruff format {staged_files}
+      stage_fixed: true
+    tests:
+      glob: "*.py"
+      run: uv run pytest tests/ -x --tb=short -q

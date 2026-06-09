@@ -8,6 +8,8 @@ from .nvidia import NvidiaAdapter
 from .kilo import KiloAdapter
 from .cloudflare import CloudflareAdapter
 from .huggingface import HuggingFaceAdapter
+from .opencode import OpenCodeAdapter
+from .deepseek import DeepSeekAdapter
 
 # Adapter registry for dynamic instantiation
 ADAPTERS = {
@@ -20,6 +22,8 @@ ADAPTERS = {
     "kilo": KiloAdapter,
     "cloudflare": CloudflareAdapter,
     "huggingface": HuggingFaceAdapter,
+    "opencode": OpenCodeAdapter,
+    "deepseek": DeepSeekAdapter,
 }
 
 __all__ = [
