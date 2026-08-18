@@ -34,6 +34,11 @@ class AdapterResponse:
     tokens_in: int                     # From response usage or estimated
     tokens_out: int                    # From response usage or estimated
     latency_ms: float
+    # Upstream HTTP status when this is an error. Callers distinguish "the
+    # provider rejected this request" (4xx, act on it now) from "the provider
+    # broke" (5xx / None, retry is reasonable). Without it every failure looks
+    # like a 502 and well-behaved clients retry a request that will never work.
+    status: int | None = None
 
 
 class BaseAdapter(ABC):
@@ -93,6 +98,13 @@ class OpenAICompatibleAdapter(BaseAdapter):
         to short-circuit (e.g., blocked model, no credits), or None to proceed."""
         return None
 
+    def _error_response(self, result: dict, start_time: float) -> AdapterResponse:
+        """Wrap a failed request, keeping the upstream status off the wire body."""
+        status = result.pop("status", None)
+        return AdapterResponse(
+            result, None, 0, 0, (time.time() - start_time) * 1000, status=status
+        )
+
     async def _retry_with_backoff(self, func, *args, **kwargs):
         """Retry with exponential backoff on 429/503 and connection errors."""
         for attempt in range(3):
@@ -103,7 +115,10 @@ class OpenAICompatibleAdapter(BaseAdapter):
                     wait = (2 ** attempt) + random.uniform(0, 1)
                     await asyncio.sleep(wait)
                     continue
-                return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
+                return {
+                    "error": f"HTTP {e.response.status_code}: {e.response.text}",
+                    "status": e.response.status_code,
+                }
             except (httpx.ConnectError, httpx.TimeoutException) as e:
                 if attempt < 2:
                     await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
@@ -133,7 +148,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
 
         result = await self._retry_with_backoff(_make_request)
         if isinstance(result, dict) and "error" in result:
-            return AdapterResponse(result, None, 0, 0, (time.time() - start_time) * 1000)
+            return self._error_response(result, start_time)
 
         data = result.json()
         usage = data.get("usage", {})
@@ -191,7 +206,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
 
         result = await self._retry_with_backoff(_make_request)
         if isinstance(result, dict) and "error" in result:
-            return AdapterResponse(result, None, 0, 0, (time.time() - start_time) * 1000)
+            return self._error_response(result, start_time)
 
         data = result.json()
         return AdapterResponse(

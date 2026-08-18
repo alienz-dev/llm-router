@@ -7,12 +7,17 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .adapters import ADAPTERS
 from .db import get_db, close_db
-from .models import ChatCompletionRequest, ImageGenerationRequest, JobSubmission
+from .models import (
+    ChatCompletionRequest,
+    ImageGenerationRequest,
+    JobSubmission,
+    error_response,
+)
 from .quota import QuotaManager
 from .queue import JobQueue
 from .router import SmartRouter
@@ -122,6 +127,27 @@ else:
     logger.info("API key auth disabled (set API_KEY env var to enable)")
 
 
+# Upstream statuses that describe the *request* rather than the provider's health.
+# These reach the caller unchanged so it can act immediately instead of retrying
+# something that will never succeed. Everything else — 5xx, auth failures against
+# our own provider keys, connection errors — becomes a 502: the caller's request
+# was fine, our upstream was not.
+_PASSTHROUGH_STATUSES = frozenset({400, 404, 413, 422, 429})
+
+
+def _upstream_error(result, fallback_type: str = "upstream_error") -> JSONResponse:
+    """Render an adapter/router failure as an OpenAI-shaped error response.
+
+    The error object sits at the top level, where OpenAI SDK clients look for it —
+    FastAPI's HTTPException would nest it under "detail".
+    """
+    status = result.status if result.status in _PASSTHROUGH_STATUSES else 502
+    return JSONResponse(
+        status_code=status,
+        content=error_response(result.response["error"], fallback_type),
+    )
+
+
 # ── Health ──────────────────────────────────────────────
 @app.get("/health")
 async def health():
@@ -139,6 +165,8 @@ async def chat_completions(req: ChatCompletionRequest, response: Response):
         extra_kwargs["max_tokens"] = req.max_tokens
     if req.temperature is not None:
         extra_kwargs["temperature"] = req.temperature
+    if req.response_format is not None:
+        extra_kwargs["response_format"] = req.response_format
 
     if req.stream:
         stream_iter = await _router.route(
@@ -153,11 +181,7 @@ async def chat_completions(req: ChatCompletionRequest, response: Response):
         messages, model_override=req.model, stream=False, **extra_kwargs,
     )
     if "error" in result.response:
-        from .models import error_response
-        raise HTTPException(
-            status_code=502,
-            detail=error_response(result.response["error"], "upstream_error"),
-        )
+        return _upstream_error(result)
 
     meta = result.response.pop("_router", {})
     response.headers["x-llm-router-provider"] = meta.get("provider", "unknown")
@@ -177,10 +201,7 @@ async def image_generations(req: ImageGenerationRequest, response: Response):
         n=req.n, size=req.size, response_format=req.response_format,
     )
     if "error" in result.response:
-        raise HTTPException(
-            status_code=502,
-            detail=error_response(result.response["error"], "upstream_error"),
-        )
+        return _upstream_error(result)
     meta = result.response.pop("_router", {})
     response.headers["x-llm-router-provider"] = meta.get("provider", "unknown")
     response.headers["x-llm-router-model"] = meta.get("model", req.model or "auto")

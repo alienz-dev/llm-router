@@ -24,6 +24,10 @@ class ChatCompletionRequest(BaseModel):
     stream: bool = False
     max_tokens: int | None = None
     temperature: float | None = None
+    # Forwarded verbatim to the provider. The router never rewrites or downgrades
+    # it: a caller that asks for json_schema and gets a provider that cannot do it
+    # must see the provider's own refusal, because that is what its fallback keys on.
+    response_format: dict[str, Any] | None = None
 
 
 class ChatCompletionResponse(BaseModel):

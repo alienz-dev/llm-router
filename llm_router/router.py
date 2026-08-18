@@ -53,10 +53,11 @@ class SmartRouter:
         if not candidates:
             return AdapterResponse(
                 response={"error": "No available models meet quota requirements"},
-                quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+                quota=None, tokens_in=0, tokens_out=0, latency_ms=0, status=503,
             )
 
         last_error = None
+        last_status = None
         failed_providers = set()
         for candidate in candidates[:5]:
             # Skip providers that already failed in this request
@@ -81,6 +82,7 @@ class SmartRouter:
             # Check if adapter returned an error
             if "error" in response.response:
                 last_error = response.response["error"]
+                last_status = response.status
                 failed_providers.add(candidate.provider_id)
                 # Record to circuit breaker — may trip it open
                 tripped = self.circuit_breaker.record_failure(
@@ -126,7 +128,7 @@ class SmartRouter:
 
         return AdapterResponse(
             response={"error": f"All fallback attempts failed: {last_error}"},
-            quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+            quota=None, tokens_in=0, tokens_out=0, latency_ms=0, status=last_status,
         )
 
     async def route_image(
@@ -196,13 +198,13 @@ class SmartRouter:
         else:
             return AdapterResponse(
                 response={"error": f"Model not found: {model_override}"},
-                quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+                quota=None, tokens_in=0, tokens_out=0, latency_ms=0, status=404,
             )
 
         if provider_id not in self.adapters:
             return AdapterResponse(
                 response={"error": f"Unknown provider: {provider_id}"},
-                quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+                quota=None, tokens_in=0, tokens_out=0, latency_ms=0, status=404,
             )
 
         if not self.circuit_breaker.is_available(provider_id):
@@ -322,14 +324,14 @@ class SmartRouter:
                 return fallback
             return AdapterResponse(
                 response={"error": f"Provider {provider_id} unavailable (circuit breaker {breaker.state.value}): {breaker.last_error}"},
-                quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+                quota=None, tokens_in=0, tokens_out=0, latency_ms=0, status=503,
             )
 
         estimated_tokens = await self.quota_manager.estimate_tokens(messages)
         if not await self.quota_manager.can_use(provider_id, model_id, estimated_tokens):
             return AdapterResponse(
                 response={"error": f"Quota exceeded for {provider_id}:{model_id}"},
-                quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+                quota=None, tokens_in=0, tokens_out=0, latency_ms=0, status=429,
             )
 
         adapter = self.adapters[provider_id]
