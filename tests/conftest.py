@@ -1,6 +1,12 @@
-"""Shared test fixtures."""
+"""Shared test fixtures.
+
+The suite is hermetic and enforces it: every acceptance criterion that once
+needed a live provider is a fixture instead. OpenRouter free is 50 requests a
+day, so a test suite that spends real calls is a test suite nobody can run twice.
+"""
 import asyncio
 import os
+import socket
 import pytest
 import pytest_asyncio
 from unittest.mock import AsyncMock, MagicMock
@@ -8,6 +14,27 @@ from unittest.mock import AsyncMock, MagicMock
 # Set test env before importing app modules
 os.environ["OPENROUTER_API_KEY"] = "test-key"
 os.environ["DATABASE_PATH"] = ":memory:"
+
+
+_real_connect = socket.socket.connect
+
+
+def _blocked_connect(self, address):
+    """Fail loudly rather than quietly spending a free-tier request."""
+    host = address[0] if isinstance(address, tuple) else address
+    if self.family in (socket.AF_INET, socket.AF_INET6) and host not in (
+        "127.0.0.1", "::1", "localhost"
+    ):
+        raise RuntimeError(
+            f"the test suite tried to reach {address}. Tests are hermetic — "
+            "capture a fixture in tests/fixtures/ instead."
+        )
+    return _real_connect(self, address)
+
+
+@pytest.fixture(autouse=True)
+def no_network(monkeypatch):
+    monkeypatch.setattr(socket.socket, "connect", _blocked_connect)
 
 
 @pytest.fixture(scope="session")

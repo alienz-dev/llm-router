@@ -52,9 +52,13 @@ async function main() {
   });
   const deps = { createLLMClient, callStructured, schema };
 
+  // The refusing case is the one that matters: nexus must fall back to
+  // json_object + schema-in-prompt on attempt 0, not retry a 502 three times.
+  // It is not DeepSeek any more — that account is out of balance (HTTP 402), so
+  // its second request fails for a reason that has nothing to do with schemas.
   const cases: Array<[string, string]> = [
     ["schema-capable (gemma-4-26b)", "openrouter:google/gemma-4-26b-a4b-it:free"],
-    ["schema-refusing (deepseek-v4-pro)", "deepseek:deepseek-v4-pro"],
+    ["schema-refusing (nemotron-3-super)", "openrouter:nvidia/nemotron-3-super-120b-a12b:free"],
     ["auto", "auto"],
   ];
 

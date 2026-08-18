@@ -29,11 +29,21 @@ class AppScheduler:
         # Access router from the job queue
         self._router = self.job_queue.router
 
-        # Run discovery + probe immediately on startup
-        await self._run_discovery()
-        await self._run_probe()
-
+        # Catch up on startup, but only if the data is actually stale. Probing
+        # every active model costs one request each; against OpenRouter's 50/day
+        # free cap, a handful of restarts used to exhaust the budget the router
+        # exists to manage.
         cfg = get_config()
+        if await self._hours_since("SELECT MAX(discovered_at) FROM models") \
+                >= cfg.scheduler.discovery_interval_hours:
+            await self._run_discovery()
+        else:
+            logger.info("Skipping startup discovery — model list is fresh")
+        if await self._hours_since("SELECT MAX(last_probe_at) FROM model_health") >= 2:
+            await self._run_probe()
+        else:
+            logger.info("Skipping startup probe — health data is fresh")
+
         start_hour = int(cfg.scheduler.batch_window_start.split(":")[0])
         end_hour = int(cfg.scheduler.batch_window_end.split(":")[0])
         interval = cfg.scheduler.discovery_interval_hours
@@ -97,6 +107,30 @@ class AppScheduler:
 
     async def process_now(self) -> int:
         return await self.job_queue.process_batch_jobs(limit=100)
+
+    async def _hours_since(self, query: str) -> float:
+        """Age of the newest timestamp a query returns, in hours. Infinite when
+        there is none — a database that has never been populated is always due."""
+        from datetime import datetime, timezone
+
+        from .db import get_db
+
+        try:
+            db = await get_db()
+            async with db.execute(query) as cur:
+                row = await cur.fetchone()
+        except Exception as e:
+            logger.warning("Freshness check failed, assuming stale: %s", redact(e))
+            return float("inf")
+        if not row or not row[0]:
+            return float("inf")
+        try:
+            stamp = datetime.fromisoformat(row[0])
+        except (TypeError, ValueError):
+            return float("inf")
+        if stamp.tzinfo is None:
+            stamp = stamp.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - stamp).total_seconds() / 3600
 
     async def _run_capability_probe(self):
         try:

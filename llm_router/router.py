@@ -62,11 +62,19 @@ def model_gaps(flags: dict, required: set[str]) -> set[str]:
 
 def _capability_error(missing: set[str], where: str) -> AdapterResponse:
     """ADR-01: when nothing can do the job, say so — never fall through to a
-    model that will ignore the request and answer anyway."""
+    model that will ignore the request and answer anyway.
+
+    Phrased the way a provider phrases its own refusal ("not supported"), and
+    returned as the same 400. When the router refuses on a model's behalf from
+    probe data, a caller must be able to handle it exactly as it handles the
+    provider saying it directly — otherwise pre-empting the call, which saves a
+    request and four seconds, would break the fallback it was meant to trigger.
+    """
     caps = ", ".join(sorted(missing))
     return AdapterResponse(
-        response={"error": f"No available model supports {caps} ({where}). "
-                           f"The router does not downgrade a request to make it fit."},
+        response={"error": f"{caps} is not supported by {where}. The router does "
+                           f"not downgrade a request to make it fit — choose a "
+                           f"capable model or handle this refusal."},
         quota=None, tokens_in=0, tokens_out=0, latency_ms=0, status=400,
     )
 

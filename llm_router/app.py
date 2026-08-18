@@ -281,6 +281,7 @@ async def _sse_wrap(stream, model_name: str):
     """
     chunk_id = f"chatcmpl-{int(time.time())}"
     saw_error = False
+    saw_finish = False
     try:
         async for data in stream:
             if isinstance(data, str):
@@ -295,8 +296,14 @@ async def _sse_wrap(stream, model_name: str):
             data.setdefault("object", "chat.completion.chunk")
             data.setdefault("created", int(time.time()))
             data.setdefault("model", data.pop("_model", None) or model_name)
+            if any(c.get("finish_reason") for c in data.get("choices") or []):
+                saw_finish = True
             yield f"data: {json.dumps(data)}\n\n"
-        if not saw_error:
+        # Only close the stream ourselves if the provider never did. Appending
+        # finish_reason: "stop" after the provider already said "tool_calls"
+        # tells a client the model stopped talking when it actually asked for a
+        # tool — which is the whole conversation an agent is having.
+        if not saw_error and not saw_finish:
             yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
         yield "data: [DONE]\n\n"
     except Exception as e:

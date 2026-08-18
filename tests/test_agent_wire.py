@@ -236,6 +236,14 @@ class TestStreamingCarriesTheWholeDelta:
         assert json.loads(arguments) == {"city": "Melbourne"}
         assert body.rstrip().endswith("data: [DONE]")
 
+        finishes = [choice["finish_reason"] for chunk in chunks
+                    for choice in chunk.get("choices", [])
+                    if choice.get("finish_reason")]
+        assert finishes == ["tool_calls"], (
+            "a synthetic finish_reason: stop after the provider said tool_calls "
+            "tells the client the model stopped talking when it asked for a tool"
+        )
+
     @pytest.mark.asyncio
     async def test_usage_arrives_before_done(self):
         router = RecordingRouter(stream=_chunks_from(fixture("stream_tool_call.txt")))

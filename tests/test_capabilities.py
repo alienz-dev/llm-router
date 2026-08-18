@@ -125,6 +125,9 @@ class TestAutoRouting:
 
         assert result.status == 400
         assert "tools" in result.response["error"]
+        # Phrased like a provider's own refusal, so a caller's existing fallback
+        # path fires on it rather than treating it as an unknown failure.
+        assert "not supported" in result.response["error"]
         assert google.calls == []
 
     @pytest.mark.asyncio
