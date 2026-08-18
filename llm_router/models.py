@@ -35,6 +35,19 @@ class ChatCompletionResponse(BaseModel):
     usage: dict[str, int]
 
 
+class ImageGenerationRequest(BaseModel):
+    prompt: str
+    model: str | None = None
+    n: int = 1
+    size: str = "1024x1024"
+    response_format: str = "url"  # "url" or "b64_json"
+
+
+class ImageGenerationResponse(BaseModel):
+    created: int
+    data: list[dict[str, Any]]
+
+
 class JobSubmission(BaseModel):
     messages: list[ChatMessage]
     task_type: str | None = None

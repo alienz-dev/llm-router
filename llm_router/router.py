@@ -129,6 +129,159 @@ class SmartRouter:
             quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
         )
 
+    async def route_image(
+        self, prompt: str, model_override: str | None = None, **kwargs
+    ) -> AdapterResponse:
+        """Route an image generation request to an image-capable provider."""
+        if model_override and model_override.strip().lower() not in ("auto", ""):
+            return await self._route_image_direct(prompt, model_override, **kwargs)
+
+        # Smart routing — find image-capable models
+        candidates = await self._get_image_candidates()
+        if not candidates:
+            return AdapterResponse(
+                response={"error": "No available image generation models"},
+                quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+            )
+
+        last_error = None
+        for candidate in candidates[:3]:
+            if not self.circuit_breaker.is_available(candidate.provider_id):
+                continue
+
+            response = await candidate.adapter.generate_image(
+                prompt, candidate.model_id, **kwargs
+            )
+
+            if "error" in response.response:
+                last_error = response.response["error"]
+                self.circuit_breaker.record_failure(candidate.provider_id, last_error)
+                await self.health_repo.update(
+                    candidate.provider_id, candidate.model_id,
+                    success=False, error=last_error,
+                )
+                continue
+
+            self.circuit_breaker.record_success(candidate.provider_id)
+            await self.health_repo.update(
+                candidate.provider_id, candidate.model_id,
+                success=True, latency_ms=response.latency_ms,
+            )
+            response.response.setdefault("_router", {
+                "provider": candidate.provider_id,
+                "model": candidate.model_id,
+            })
+            return response
+
+        return AdapterResponse(
+            response={"error": f"All image generation attempts failed: {last_error}"},
+            quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+        )
+
+    async def _route_image_direct(
+        self, prompt: str, model_override: str, **kwargs
+    ) -> AdapterResponse:
+        """Direct route for image generation with a specific model."""
+        db = await get_db()
+        async with db.execute(
+            "SELECT provider_id FROM models WHERE model_id = ? AND active = 1 LIMIT 1",
+            (model_override,),
+        ) as cur:
+            row = await cur.fetchone()
+        if row:
+            provider_id = row[0]
+            model_id = model_override
+        elif ":" in model_override:
+            provider_id, model_id = model_override.split(":", 1)
+        else:
+            return AdapterResponse(
+                response={"error": f"Model not found: {model_override}"},
+                quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+            )
+
+        if provider_id not in self.adapters:
+            return AdapterResponse(
+                response={"error": f"Unknown provider: {provider_id}"},
+                quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+            )
+
+        if not self.circuit_breaker.is_available(provider_id):
+            return AdapterResponse(
+                response={"error": f"Provider {provider_id} unavailable (circuit breaker)"},
+                quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+            )
+
+        adapter = self.adapters[provider_id]
+        response = await adapter.generate_image(prompt, model_id, **kwargs)
+
+        if "error" not in response.response:
+            self.circuit_breaker.record_success(provider_id)
+            await self.health_repo.update(
+                provider_id, model_id, success=True, latency_ms=response.latency_ms,
+            )
+        else:
+            self.circuit_breaker.record_failure(provider_id, response.response["error"])
+            await self.health_repo.update(
+                provider_id, model_id, success=False, error=response.response["error"],
+            )
+        return response
+
+    async def _get_image_candidates(self) -> list[ModelCandidate]:
+        """Get image-capable models ranked by score."""
+        db = await get_db()
+        async with db.execute("""
+            SELECT m.provider_id, m.model_id, m.task_scores,
+                   mh.success_count, mh.failure_count, mh.avg_latency_ms
+            FROM models m
+            JOIN providers p ON m.provider_id = p.id
+            LEFT JOIN model_health mh ON m.provider_id = mh.provider_id
+                                      AND m.model_id = mh.model_id
+            WHERE m.active = 1 AND p.enabled = 1
+        """) as cursor:
+            rows = await cursor.fetchall()
+
+        candidates = []
+        for row in rows:
+            provider_id, model_id, task_scores_raw = row[0], row[1], row[2]
+            suc_count, fail_count, avg_latency = row[3], row[4], row[5]
+
+            if provider_id not in self.adapters:
+                continue
+
+            try:
+                task_scores = json.loads(task_scores_raw) if task_scores_raw else {}
+            except (json.JSONDecodeError, TypeError):
+                task_scores = {}
+
+            img_capability = task_scores.get("image_generation", 0)
+            if img_capability <= 0:
+                continue
+
+            # Success rate
+            total = (suc_count or 0) + (fail_count or 0)
+            success_rate = (suc_count or 0) / total if total > 0 else 0.5
+
+            # Latency penalty
+            latency_mult = 0.5 if avg_latency and avg_latency > 30000 else 1.0
+
+            score = img_capability * success_rate * latency_mult
+
+            cfg = get_config()
+            provider_cfg = cfg.providers.get(provider_id)
+            score *= provider_cfg.priority if provider_cfg else 1.0
+
+            candidates.append(ModelCandidate(
+                provider_id=provider_id,
+                model_id=model_id,
+                adapter=self.adapters[provider_id],
+                capability_score=img_capability,
+                quota_headroom_pct=0,
+                final_score=score,
+            ))
+
+        candidates.sort(key=lambda c: c.final_score, reverse=True)
+        return candidates
+
     async def _route_direct(
         self, messages: list[dict], model_override: str, stream: bool, **kwargs
     ) -> AdapterResponse | AsyncIterator[str]:

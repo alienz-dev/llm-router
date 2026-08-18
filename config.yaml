@@ -88,3 +88,10 @@ providers:
     api_key_env: "KILO_API_KEY"
     daily_reset_utc_hour: 0
     priority: 1.0
+
+  agnes:
+    name: "Agnes AI"
+    base_url: "https://apihub.agnes-ai.com/v1"
+    api_key_env: "AGNES_API_KEY"
+    daily_reset_utc_hour: 0
+    priority: 1.0

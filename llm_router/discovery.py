@@ -25,6 +25,7 @@ _DEFAULT_SCORES = {
     "nemotron-3-super": {"code": 0.9, "reasoning": 0.9, "summarize": 0.85, "general": 0.9},
     "nemotron": {"code": 0.85, "reasoning": 0.85, "summarize": 0.8, "general": 0.85},
     "deepseek-v4": {"code": 0.95, "reasoning": 0.9, "summarize": 0.85, "general": 0.9},
+    "agnes": {"code": 0.75, "reasoning": 0.75, "summarize": 0.7, "general": 0.75},
 }
 _FALLBACK_SCORES = {"code": 0.5, "reasoning": 0.5, "summarize": 0.5, "general": 0.5}
 
@@ -44,6 +45,7 @@ PROVIDER_PRIORITY = {
     "nvidia": 1.1,       # reliable fallback
     "opencode": 1.0,     # Nemotron via OpenCode
     "deepseek": 1.0,     # Direct API (new)
+    "agnes": 1.0,        # Agnes AI (free, no visible limits)
     "google": 0.5,       # Quota exhausted
     "cerebras": 0.9,
     "groq": 0.9,
@@ -103,6 +105,7 @@ class ModelDiscovery:
             "mistral": self._discover_mistral(),
             "cloudflare": self._discover_cloudflare(),
             "huggingface": self._discover_huggingface(),
+            "agnes": self._discover_agnes(),
         }
         results = {}
         gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
@@ -357,6 +360,18 @@ class ModelDiscovery:
             {**m, "task_scores": _get_task_scores(m["model_id"])}
             for m in _HF_MODELS
         ]
+
+    async def _discover_agnes(self) -> list[dict]:
+        models = await self._discover_openai_models(
+            "AGNES_API_KEY", "https://apihub.agnes-ai.com/v1/models",
+            default_context=32768, name_key="id",
+            filter_fn=lambda m: "video" not in m["id"],
+        )
+        # Override task scores for image models
+        for m in models:
+            if "image" in m["model_id"]:
+                m["task_scores"] = json.dumps({"image_generation": 0.9})
+        return models
 
     async def update_models_table(self, discovered: dict[str, list[dict]]) -> dict[str, dict]:
         db = await get_db()

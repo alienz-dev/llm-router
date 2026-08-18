@@ -12,7 +12,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .adapters import ADAPTERS
 from .db import get_db, close_db
-from .models import ChatCompletionRequest, JobSubmission
+from .models import ChatCompletionRequest, ImageGenerationRequest, JobSubmission
 from .quota import QuotaManager
 from .queue import JobQueue
 from .router import SmartRouter
@@ -166,6 +166,24 @@ async def chat_completions(req: ChatCompletionRequest, response: Response):
         response.headers["x-llm-router-fallback"] = "true"
         if meta.get("original_request"):
             response.headers["x-llm-router-original-model"] = meta["original_request"]
+    return result.response
+
+
+# ── OpenAI-compatible: image generation ─────────────
+@app.post("/v1/images/generations")
+async def image_generations(req: ImageGenerationRequest, response: Response):
+    result = await _router.route_image(
+        prompt=req.prompt, model_override=req.model,
+        n=req.n, size=req.size, response_format=req.response_format,
+    )
+    if "error" in result.response:
+        raise HTTPException(
+            status_code=502,
+            detail=error_response(result.response["error"], "upstream_error"),
+        )
+    meta = result.response.pop("_router", {})
+    response.headers["x-llm-router-provider"] = meta.get("provider", "unknown")
+    response.headers["x-llm-router-model"] = meta.get("model", req.model or "auto")
     return result.response
 
 

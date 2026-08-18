@@ -49,6 +49,13 @@ class BaseAdapter(ABC):
         self, messages: list[dict], model_id: str, **kwargs
     ) -> AsyncIterator[str]: ...
 
+    async def generate_image(self, prompt: str, model_id: str, **kwargs) -> AdapterResponse:
+        """Generate an image. Override in subclasses that support it."""
+        return AdapterResponse(
+            response={"error": f"{self.provider_name} does not support image generation"},
+            quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+        )
+
     @abstractmethod
     async def list_models(self) -> list[dict]: ...
 
@@ -167,6 +174,33 @@ class OpenAICompatibleAdapter(BaseAdapter):
                             continue
         except Exception as e:
             yield str(e)
+
+    async def generate_image(self, prompt: str, model_id: str, **kwargs) -> AdapterResponse:
+        """Generate an image via OpenAI-compatible /v1/images/generations endpoint."""
+        start_time = time.time()
+
+        async def _make_request():
+            payload = {"prompt": prompt, "model": model_id, **kwargs}
+            response = await self.client.post(
+                f"{self.base_url}/images/generations",
+                headers=self._auth_headers(),
+                json=payload,
+            )
+            response.raise_for_status()
+            return response
+
+        result = await self._retry_with_backoff(_make_request)
+        if isinstance(result, dict) and "error" in result:
+            return AdapterResponse(result, None, 0, 0, (time.time() - start_time) * 1000)
+
+        data = result.json()
+        return AdapterResponse(
+            response=data,
+            quota=self._parse_quota(result.headers),
+            tokens_in=len(prompt) // 4,
+            tokens_out=0,
+            latency_ms=(time.time() - start_time) * 1000,
+        )
 
     async def list_models(self) -> list[dict]:
         try:

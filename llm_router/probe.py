@@ -51,6 +51,8 @@ KNOWN_LIMITS = {
     },
     # Kilo Gateway - probe will discover
     "kilo": {},
+    # Agnes AI - probe will discover
+    "agnes": {},
 }
 
 # Standard OpenAI-compatible probe config factory
@@ -102,6 +104,8 @@ PROBE_ENDPOINTS = {
         "key_env": "HF_API_TOKEN",
         "url_builder": lambda model, key: f"https://api-inference.huggingface.co/models/{model}",
     },
+    "agnes": _openai_probe(
+        "https://apihub.agnes-ai.com/v1/chat/completions", "AGNES_API_KEY"),
 }
 
 
@@ -160,9 +164,10 @@ async def probe_model(client: httpx.AsyncClient, provider_id: str, model_id: str
 
 async def probe_all_models() -> dict[str, dict[str, dict]]:
     """Probe all active models in the DB. Returns {provider_id: {model_id: probe_result}}."""
+    import json as _json
     db = await get_db()
     async with db.execute(
-        "SELECT provider_id, model_id FROM models WHERE active = 1"
+        "SELECT provider_id, model_id, task_scores FROM models WHERE active = 1"
     ) as cur:
         models = await cur.fetchall()
 
@@ -170,7 +175,16 @@ async def probe_all_models() -> dict[str, dict[str, dict]]:
     async with httpx.AsyncClient(timeout=30) as client:
         # Probe sequentially per provider (respect rate limits), parallel across providers
         provider_groups: dict[str, list[str]] = {}
-        for pid, mid in models:
+        for pid, mid, scores_raw in models:
+            # Skip image-only models — they don't support chat completions
+            try:
+                scores = _json.loads(scores_raw) if scores_raw else {}
+            except (ValueError, TypeError):
+                scores = {}
+            if "image_generation" in scores and not any(
+                k in scores for k in ("code", "reasoning", "summarize", "general")
+            ):
+                continue
             provider_groups.setdefault(pid, []).append(mid)
 
         async def probe_provider(pid: str, mids: list[str]):
