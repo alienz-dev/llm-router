@@ -1,0 +1,299 @@
+[
+  {
+    "provider": "agnes",
+    "model": "agnes-2.0-flash",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "schema-ok",
+    "json_note": "{\"reason\": \"Insufficient information to provide a meaningful",
+    "sec": 1.3
+  },
+  {
+    "provider": "agnes",
+    "model": "agnes-2.5-flash",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "schema-ok",
+    "json_note": "{\"reason\": \"Insufficient details provided (no info on framew",
+    "sec": 2.7
+  },
+  {
+    "provider": "agnes",
+    "model": "agnes-2.5-pro",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "HTTP400",
+    "json_note": "{\"error\":{\"message\":\"***.BadRequestError: OpenAIException - Invalid OpenAI request\",\"type\":\"upstream_error\",\"param\":\"\",\"code\":\"400\"}}",
+    "sec": 41.4
+  },
+  {
+    "provider": "agnes",
+    "model": "agnes-2.5-pro-alpha",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "HTTP400",
+    "json_note": "{\"error\":{\"message\":\"***.BadRequestError: OpenAIException - Invalid OpenAI request\",\"type\":\"upstream_error\",\"param\":\"\",\"code\":\"400\"}}",
+    "sec": 10.7
+  },
+  {
+    "provider": "agnes",
+    "model": "agnes-image-2.0-flash",
+    "tools": "HTTP400",
+    "tools_note": "{\"error\":{\"code\":\"invalid_request\",\"message\":\"Model agnes-image-2.0-flash is an image model. Use /v1/images/generations. (request id: 20260818123658590060374VH6fV918)\",\"type\":\"Agne",
+    "json": "HTTP400",
+    "json_note": "{\"error\":{\"code\":\"invalid_request\",\"message\":\"Model agnes-image-2.0-flash is an image model. Use /v1/images/generations. (request id: 20260818123658832933938optTv3KP)\",\"type\":\"Agne",
+    "sec": 0.1
+  },
+  {
+    "provider": "agnes",
+    "model": "agnes-image-2.1-flash",
+    "tools": "HTTP400",
+    "tools_note": "{\"error\":{\"code\":\"invalid_request\",\"message\":\"Model agnes-image-2.1-flash is an image model. Use /v1/images/generations. (request id: 2026081812365967797211FK17Lj7W)\",\"type\":\"Agnes",
+    "json": "HTTP400",
+    "json_note": "{\"error\":{\"code\":\"invalid_request\",\"message\":\"Model agnes-image-2.1-flash is an image model. Use /v1/images/generations. (request id: 20260818123659191953076GnTDe5nm)\",\"type\":\"Agne",
+    "sec": 0.2
+  },
+  {
+    "provider": "deepseek",
+    "model": "deepseek-v4-flash",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "HTTP400",
+    "json_note": "{\"error\":{\"message\":\"This response_format type is unavailable now\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_request_error\"}}",
+    "sec": 1.1
+  },
+  {
+    "provider": "deepseek",
+    "model": "deepseek-v4-pro",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "HTTP400",
+    "json_note": "{\"error\":{\"message\":\"This response_format type is unavailable now\",\"type\":\"invalid_request_error\",\"param\":null,\"code\":\"invalid_request_error\"}}",
+    "sec": 1.8
+  },
+  {
+    "provider": "nvidia",
+    "model": "01-ai/yi-large",
+    "tools": "HTTP404",
+    "tools_note": "{\"status\":404,\"title\":\"Not Found\",\"detail\":\"Function '23bd454d-b225-49a3-8118-582a62fc51b8': Not found for account 'lgKmPFbM7e83Dbq27bmh0er5WeqjY8y6Ni8Pi62jqwY'\"}",
+    "json": "HTTP404",
+    "json_note": "{\"status\":404,\"title\":\"Not Found\",\"detail\":\"Function '23bd454d-b225-49a3-8118-582a62fc51b8': Not found for account 'lgKmPFbM7e83Dbq27bmh0er5WeqjY8y6Ni8Pi62jqwY'\"}",
+    "sec": 0.5
+  },
+  {
+    "provider": "nvidia",
+    "model": "ai21labs/jamba-1.5-large-instruct",
+    "tools": "HTTP404",
+    "tools_note": "{\"status\":404,\"title\":\"Not Found\",\"detail\":\"Function '6497fc2b-7ff8-4019-8946-123dccbfc863': Not found for account 'lgKmPFbM7e83Dbq27bmh0er5WeqjY8y6Ni8Pi62jqwY'\"}",
+    "json": "HTTP404",
+    "json_note": "{\"status\":404,\"title\":\"Not Found\",\"detail\":\"Function '6497fc2b-7ff8-4019-8946-123dccbfc863': Not found for account 'lgKmPFbM7e83Dbq27bmh0er5WeqjY8y6Ni8Pi62jqwY'\"}",
+    "sec": 0.2
+  },
+  {
+    "provider": "nvidia",
+    "model": "databricks/dbrx-instruct",
+    "tools": "HTTP404",
+    "tools_note": "{\"status\":404,\"title\":\"Not Found\",\"detail\":\"Function '3d6c2ff8-8bfc-4d10-8fd0-b7337288e869': Not found for account 'lgKmPFbM7e83Dbq27bmh0er5WeqjY8y6Ni8Pi62jqwY'\"}",
+    "json": "HTTP404",
+    "json_note": "{\"status\":404,\"title\":\"Not Found\",\"detail\":\"Function '3d6c2ff8-8bfc-4d10-8fd0-b7337288e869': Not found for account 'lgKmPFbM7e83Dbq27bmh0er5WeqjY8y6Ni8Pi62jqwY'\"}",
+    "sec": 0.2
+  },
+  {
+    "provider": "nvidia",
+    "model": "meta/llama-3.3-70b-instruct",
+    "tools": "HTTP503",
+    "tools_note": "{\"error\":{\"message\":\"ResourceExhausted: Worker local total request limit reached (19/16)\",\"type\":\"Service Unavailable\",\"code\":503}}",
+    "json": "HTTP503",
+    "json_note": "{\"error\":{\"message\":\"ResourceExhausted: Worker local total request limit reached (17/16)\",\"type\":\"Service Unavailable\",\"code\":503}}",
+    "sec": 50.5
+  },
+  {
+    "provider": "nvidia",
+    "model": "mistralai/mistral-nemotron",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "schema-ok",
+    "json_note": "{\"score\": 95, \"reason\": \"The candidate is a Python developer",
+    "sec": 21.6
+  },
+  {
+    "provider": "nvidia",
+    "model": "nvidia/llama-3.1-nemotron-ultra-253b-v1",
+    "tools": "HTTP404",
+    "tools_note": "{\"status\":404,\"title\":\"Not Found\",\"detail\":\"Function '84bf12ff-edbd-4435-baea-0fa6a7453d2e': Not found for account 'lgKmPFbM7e83Dbq27bmh0er5WeqjY8y6Ni8Pi62jqwY'\"}",
+    "json": "HTTP404",
+    "json_note": "{\"status\":404,\"title\":\"Not Found\",\"detail\":\"Function '84bf12ff-edbd-4435-baea-0fa6a7453d2e': Not found for account 'lgKmPFbM7e83Dbq27bmh0er5WeqjY8y6Ni8Pi62jqwY'\"}",
+    "sec": 0.2
+  },
+  {
+    "provider": "opencode",
+    "model": "nemotron-3-ultra-free",
+    "tools": "native",
+    "tools_note": "get_weather(city,unit)",
+    "json": "schema-ok",
+    "json_note": "{\"score\": 0, \"reason\": \"Insufficient information provided. A",
+    "sec": 10.2
+  },
+  {
+    "provider": "openrouter",
+    "model": "cohere/north-mini-code:free",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "not-json",
+    "json_note": "```json {   \"fitScore\": 95,   \"justification\": \"The candidat",
+    "sec": 6.1
+  },
+  {
+    "provider": "openrouter",
+    "model": "dots-studio/dots-3-note-preview:free",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "not-json",
+    "json_note": "",
+    "sec": 1.6
+  },
+  {
+    "provider": "openrouter",
+    "model": "google/gemma-4-26b-a4b-it:free",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "schema-ok",
+    "json_note": "{\"reason\": \"The candidate's core skill set (Python developme",
+    "sec": 2.1
+  },
+  {
+    "provider": "openrouter",
+    "model": "google/gemma-4-31b-it:free",
+    "tools": "HTTP429",
+    "tools_note": "{\"error\":{\"message\":\"Provider returned error\",\"code\":429,\"metadata\":{\"raw\":\"google/gemma-4-31b-it:free is temporarily rate-limited upstream. Please retry shortly, or add your own k",
+    "json": "HTTP429",
+    "json_note": "{\"error\":{\"message\":\"Provider returned error\",\"code\":429,\"metadata\":{\"raw\":\"google/gemma-4-31b-it:free is temporarily rate-limited upstream. Please retry shortly, or add your own k",
+    "sec": 0.2
+  },
+  {
+    "provider": "openrouter",
+    "model": "google/lyria-3-clip-preview",
+    "tools": "HTTP404",
+    "tools_note": "{\"error\":{\"message\":\"No endpoints found that support tool use. Try disabling \\\"get_weather\\\". To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing",
+    "json": "HTTP402",
+    "json_note": "{\"error\":{\"message\":\"Insufficient credits. Add more using https://openrouter.ai/settings/credits\",\"code\":402,\"metadata\":{\"limit_source\":\"openrouter_credits\",\"remedy_hint\":\"Add cred",
+    "sec": 0.0
+  },
+  {
+    "provider": "openrouter",
+    "model": "google/lyria-3-pro-preview",
+    "tools": "HTTP404",
+    "tools_note": "{\"error\":{\"message\":\"No endpoints found that support tool use. Try disabling \\\"get_weather\\\". To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing",
+    "json": "HTTP402",
+    "json_note": "{\"error\":{\"message\":\"Insufficient credits. Add more using https://openrouter.ai/settings/credits\",\"code\":402,\"metadata\":{\"limit_source\":\"openrouter_credits\",\"remedy_hint\":\"Add cred",
+    "sec": 0.0
+  },
+  {
+    "provider": "openrouter",
+    "model": "nvidia/nemotron-3-nano-30b-a3b:free",
+    "tools": "native",
+    "tools_note": "get_weather(unit,city)",
+    "json": "schema-ok",
+    "json_note": "{\"score\": 85, \"reason\": \"The candidate is a Python developer",
+    "sec": 1.8
+  },
+  {
+    "provider": "openrouter",
+    "model": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
+    "tools": "native",
+    "tools_note": "get_weather(city,unit)",
+    "json": "schema-ok",
+    "json_note": "{\"score\": 90, \"reason\": \"Candidate has relevant Python devel",
+    "sec": 7.6
+  },
+  {
+    "provider": "openrouter",
+    "model": "nvidia/nemotron-3-super-120b-a12b:free",
+    "tools": "native",
+    "tools_note": "get_weather(city,unit)",
+    "json": "not-json",
+    "json_note": "{ {   \"score\": 95                                           ",
+    "sec": 2.5
+  },
+  {
+    "provider": "openrouter",
+    "model": "nvidia/nemotron-3-ultra-550b-a55b:free",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "schema-ok",
+    "json_note": "{\"score\": 60, \"reason\": \"Strong keyword match (Python), but ",
+    "sec": 2.7
+  },
+  {
+    "provider": "openrouter",
+    "model": "nvidia/nemotron-3.5-content-safety:free",
+    "tools": "HTTP404",
+    "tools_note": "{\"error\":{\"message\":\"No endpoints found that support tool use. Try disabling \\\"get_weather\\\". To learn more about provider routing, visit: https://openrouter.ai/docs/guides/routing",
+    "json": "not-json",
+    "json_note": "User Safety: safe",
+    "sec": 0.0
+  },
+  {
+    "provider": "openrouter",
+    "model": "nvidia/nemotron-3.5-lightning:free",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "not-json",
+    "json_note": "Here's a thinking process:  1.  **Analyze User Input:**    -",
+    "sec": 1.7
+  },
+  {
+    "provider": "openrouter",
+    "model": "nvidia/nemotron-nano-12b-v2-vl:free",
+    "tools": "native",
+    "tools_note": "get_weather(city)",
+    "json": "schema-ok",
+    "json_note": "{\"score\": 95, \"reason\": \"The candidate is a Python developer",
+    "sec": 1.3
+  },
+  {
+    "provider": "openrouter",
+    "model": "nvidia/nemotron-nano-9b-v2:free",
+    "tools": "ignored",
+    "tools_note": "",
+    "json": "not-json",
+    "json_note": "",
+    "sec": 10.5
+  },
+  {
+    "provider": "openrouter",
+    "model": "openai/gpt-oss-20b:free",
+    "tools": "HTTP429",
+    "tools_note": "{\"error\":{\"message\":\"Provider returned error\",\"code\":429,\"metadata\":{\"raw\":\"openai/gpt-oss-20b:free is temporarily rate-limited upstream. Please retry shortly, or add your own key ",
+    "json": "HTTP429",
+    "json_note": "{\"error\":{\"message\":\"Provider returned error\",\"code\":429,\"metadata\":{\"raw\":\"openai/gpt-oss-20b:free is temporarily rate-limited upstream. Please retry shortly, or add your own key ",
+    "sec": 0.3
+  },
+  {
+    "provider": "openrouter",
+    "model": "openrouter/free",
+    "tools": "native",
+    "tools_note": "get_weather(unit,city)",
+    "json": "not-json",
+    "json_note": "",
+    "sec": 1.7
+  },
+  {
+    "provider": "openrouter",
+    "model": "poolside/laguna-s-2.1:free",
+    "tools": "HTTP429",
+    "tools_note": "{\"error\":{\"message\":\"Provider returned error\",\"code\":429,\"metadata\":{\"raw\":\"poolside/laguna-s-2.1:free is temporarily rate-limited upstream. Please retry shortly, or add your own k",
+    "json": "json-off-schema",
+    "json_note": "{\"rating\": 92, \"analysis\": \"Strong candidate for Python back",
+    "sec": 0.3
+  },
+  {
+    "provider": "openrouter",
+    "model": "poolside/laguna-xs-2.1:free",
+    "tools": "ignored",
+    "tools_note": "",
+    "json": "not-json",
+    "json_note": "",
+    "sec": 17.1
+  }
+]
