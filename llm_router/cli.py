@@ -49,6 +49,34 @@ def discover():
 
 
 @main.command()
+@click.option("--seed-only", is_flag=True,
+              help="Only apply the verified inventory file; make no provider calls")
+@click.option("--overwrite", is_flag=True,
+              help="Re-seed rows that already carry a capability reading")
+def capabilities(seed_only, overwrite):
+    """Seed and refresh per-model tool/schema capability flags."""
+    async def _run():
+        from .db import get_db, close_db
+        from .app import _seed_providers
+        from .capabilities import run_capability_probe, seed_from_inventory
+
+        await get_db()
+        await _seed_providers()
+        seeded = await seed_from_inventory(overwrite=overwrite)
+        click.echo(f"Seeded {seeded} models from the verified inventory")
+
+        if not seed_only:
+            stats = await run_capability_probe()
+            click.echo(f"Probed {stats['probed']} models, updated {stats['updated']}")
+            for r in stats["results"]:
+                click.echo(f"  {r['provider']:12} {r['model'][:44]:44} "
+                           f"tools={r['tools']:14} json={r['json']}")
+        await close_db()
+
+    asyncio.run(_run())
+
+
+@main.command()
 def status():
     """Show quota status for all providers."""
     async def _run():

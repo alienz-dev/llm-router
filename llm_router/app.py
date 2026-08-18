@@ -12,6 +12,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .adapters import ADAPTERS
+from .capabilities import seed_from_inventory
 from .db import get_db, close_db
 from .adapters.base import AdapterResponse
 from .models import (
@@ -101,6 +102,9 @@ async def lifespan(app: FastAPI):
     global _router, _quota, _queue, _scheduler
     await get_db()
     await _seed_providers()
+    # Idempotent: only fills rows that have never been checked, so a live probe
+    # result always outranks the file.
+    await seed_from_inventory()
 
     adapters = _build_adapters()
     _quota = QuotaManager()

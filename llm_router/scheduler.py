@@ -8,6 +8,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from .config import get_config
 from .discovery import ModelDiscovery
+from .capabilities import run_capability_probe
 from .probe import run_probe_and_update
 from .queue import JobQueue
 from .redact import redact, redact_error
@@ -77,14 +78,34 @@ class AppScheduler:
             max_instances=1,
         )
 
+        # Capability probing: weekly, and deliberately not on the 2-hourly health
+        # cycle — two extra calls per model per cycle would be ~720 OpenRouter
+        # requests/day against a 50/day cap. The probe skips fresh rows, so a
+        # restart does not re-spend the budget.
+        self.scheduler.add_job(
+            self._run_capability_probe,
+            IntervalTrigger(days=7),
+            id="capability_probe",
+            max_instances=1,
+        )
+
         self.scheduler.start()
-        logger.info("Scheduler started (batch: %d-%d UTC, discovery: every %dh, probe: every 2h, recovery: every 5min, cleanup: daily)", start_hour, end_hour, interval)
+        logger.info("Scheduler started (batch: %d-%d UTC, discovery: every %dh, probe: every 2h, capabilities: weekly, recovery: every 5min, cleanup: daily)", start_hour, end_hour, interval)
 
     async def stop(self):
         self.scheduler.shutdown(wait=False)
 
     async def process_now(self) -> int:
         return await self.job_queue.process_batch_jobs(limit=100)
+
+    async def _run_capability_probe(self):
+        try:
+            stats = await run_capability_probe()
+            if stats["probed"]:
+                logger.info("Capability probe: %d models, %d flags updated",
+                            stats["probed"], stats["updated"])
+        except Exception as e:
+            logger.error("Capability probe failed: %s", redact(e))
 
     async def _process_batch(self):
         try:
