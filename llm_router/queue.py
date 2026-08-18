@@ -21,17 +21,24 @@ class JobQueue:
         priority: str = "batch",
         model_override: str | None = None,
         task_type: str | None = None,
+        params: dict | None = None,
     ) -> str:
+        """Queue a request. `params` is the same passthrough set the synchronous
+        endpoint sends — response_format, tools and the rest. Dropping them here
+        reproduced the exact defect the sync path had: a job that asked for a
+        schema got prose back, and nothing errored."""
         job_id = str(uuid.uuid4())
         db = await get_db()
         await db.execute(
-            """INSERT INTO jobs (id, status, priority, task_type, messages, model_override, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            """INSERT INTO jobs (id, status, priority, task_type, messages,
+                                 model_override, created_at, params)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 job_id, "pending", priority,
                 task_type or self.router.classify_task(messages),
                 json.dumps(messages), model_override,
                 datetime.now(timezone.utc).isoformat(),
+                json.dumps(params) if params else None,
             ),
         )
         await db.commit()
@@ -94,7 +101,7 @@ class JobQueue:
     async def _process_job(self, job_id: str) -> None:
         db = await get_db()
         async with db.execute(
-            "SELECT messages, model_override, retries FROM jobs WHERE id = ?",
+            "SELECT messages, model_override, retries, params FROM jobs WHERE id = ?",
             (job_id,),
         ) as cur:
             row = await cur.fetchone()
@@ -104,6 +111,13 @@ class JobQueue:
         messages = json.loads(row[0])
         model_override = row[1]
         retries = row[2]
+        # These come back out of a database row. Anything the router owns is
+        # stripped here rather than exploding at the call site: route() takes
+        # messages/model_override/stream by name, so a stray key is a TypeError.
+        params = {
+            k: v for k, v in (json.loads(row[3]) if row[3] else {}).items()
+            if k not in {"messages", "model", "model_override", "stream"}
+        }
 
         await db.execute(
             "UPDATE jobs SET status = 'running', started_at = ? WHERE id = ?",
@@ -114,7 +128,9 @@ class JobQueue:
         try:
             import time
             t0 = time.monotonic()
-            result = await self.router.route(messages=messages, model_override=model_override, stream=False)
+            result = await self.router.route(
+                messages=messages, model_override=model_override, stream=False, **params
+            )
             latency_ms = (time.monotonic() - t0) * 1000
 
             if "error" in result.response:

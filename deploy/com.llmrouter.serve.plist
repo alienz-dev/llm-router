@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.llmrouter.serve</string>
+
+    <!-- The venv binary directly: launchd jobs get a minimal PATH, and uv is
+         not on it. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/ding/projects/llm-router/.venv/bin/llm-router</string>
+        <string>serve</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+        <string>--port</string>
+        <string>8642</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/ding/projects/llm-router</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>/Users/Shared/hub/logs/llm-router.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/Shared/hub/logs/llm-router.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/ding</string>
+        <!-- Provider keys and API_KEY come from the repo's .env, which
+             config.py loads at import. Nothing secret belongs in this file:
+             plists are world-readable. -->
+    </dict>
+</dict>
+</plist>

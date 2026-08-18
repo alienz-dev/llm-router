@@ -13,6 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .adapters import ADAPTERS
 from .db import get_db, close_db
+from .adapters.base import AdapterResponse
 from .models import (
     ChatCompletionRequest,
     ImageGenerationRequest,
@@ -153,28 +154,66 @@ def _upstream_error(result, fallback_type: str = "upstream_error") -> JSONRespon
 
 # ── Health ──────────────────────────────────────────────
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+async def health(response: Response):
+    """Assert the two things a wedged process loses first.
+
+    The old handler returned {"status": "ok"} without touching anything, so a
+    process with a dead database connection and zero adapters still looked
+    healthy. That is worse than having no check at all, because the heartbeat
+    believes it and nobody is paged.
+
+    Deliberately cheap — no provider calls. This runs on a short interval and a
+    free-tier request budget is not something to spend on liveness.
+    """
+    checks: dict[str, Any] = {}
+    healthy = True
+
+    try:
+        db = await get_db()
+        async with db.execute("SELECT COUNT(*) FROM providers") as cur:
+            row = await cur.fetchone()
+        checks["database"] = {"ok": True, "providers": row[0]}
+    except Exception as e:
+        healthy = False
+        checks["database"] = {"ok": False, "error": redact_error(e, 200)}
+
+    adapters = getattr(_router, "adapters", None) or {}
+    checks["adapters"] = {"ok": bool(adapters), "count": len(adapters),
+                          "providers": sorted(adapters)}
+    if not adapters:
+        healthy = False
+
+    if not healthy:
+        response.status_code = 503
+    return {"status": "ok" if healthy else "unhealthy", "checks": checks}
 
 
 # ── OpenAI-compatible: chat completions ─────────────────
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest, response: Response):
-    messages = [m.model_dump() for m in req.messages]
-
-    # Build kwargs from request params that should flow through to adapters
-    extra_kwargs = {}
-    if req.max_tokens is not None:
-        extra_kwargs["max_tokens"] = req.max_tokens
-    if req.temperature is not None:
-        extra_kwargs["temperature"] = req.temperature
-    if req.response_format is not None:
-        extra_kwargs["response_format"] = req.response_format
+    # exclude_none, so an assistant message that only calls a tool arrives as
+    # {"role": "assistant", "tool_calls": [...]} rather than carrying an explicit
+    # content: null that some providers reject.
+    messages = [m.model_dump(exclude_none=True) for m in req.messages]
+    extra_kwargs = req.passthrough_params()
 
     if req.stream:
         stream_iter = await _router.route(
             messages, model_override=req.model, stream=True, **extra_kwargs,
         )
+        # The router can refuse before any stream exists — no capable model, no
+        # quota, circuit breaker open.
+        if not hasattr(stream_iter, "__aiter__"):
+            return _upstream_error(stream_iter)
+        # Look at the first chunk before committing to 200. Once the SSE body has
+        # started there is no status left to send, and a client's retry logic
+        # keys on the status.
+        first, stream_iter = await _peek_stream(stream_iter)
+        if isinstance(first, dict) and "error" in first:
+            return _upstream_error(AdapterResponse(
+                response={"error": first["error"]}, quota=None, tokens_in=0,
+                tokens_out=0, latency_ms=0, status=first.get("status"),
+            ))
         return StreamingResponse(
             _sse_wrap(stream_iter, req.model or "auto"),
             media_type="text/event-stream",
@@ -211,20 +250,53 @@ async def image_generations(req: ImageGenerationRequest, response: Response):
     return result.response
 
 
+async def _peek_stream(stream):
+    """Pull the first chunk, and hand back an iterator that still starts with it."""
+    iterator = stream.__aiter__()
+    try:
+        first = await iterator.__anext__()
+    except StopAsyncIteration:
+        first = None
+
+    async def _rewound():
+        if first is not None:
+            yield first
+        async for chunk in iterator:
+            yield chunk
+
+    return first, _rewound()
+
+
 async def _sse_wrap(stream, model_name: str):
+    """Re-emit the provider's chunks, adding only what the wire requires.
+
+    The chunk is passed through rather than rebuilt: `tool_calls` fragments carry
+    `index`, `id` and partial `arguments`, and rebuilding around `delta.content`
+    — which is what this did — silently dropped all of it, so a streamed tool
+    call arrived as an empty completion.
+    """
     chunk_id = f"chatcmpl-{int(time.time())}"
+    saw_error = False
     try:
         async for data in stream:
-            chunk = {
-                "id": chunk_id, "object": "chat.completion.chunk",
-                "created": int(time.time()), "model": model_name,
-                "choices": [{"index": 0, "delta": {"content": data}, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-        yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+            if isinstance(data, str):
+                # Legacy adapters that yield plain content.
+                data = {"choices": [{"index": 0, "delta": {"content": data},
+                                     "finish_reason": None}]}
+            if "error" in data:
+                saw_error = True
+                yield f"data: {json.dumps(error_response(str(data['error']), 'upstream_error'))}\n\n"
+                break
+            data.setdefault("id", chunk_id)
+            data.setdefault("object", "chat.completion.chunk")
+            data.setdefault("created", int(time.time()))
+            data.setdefault("model", data.pop("_model", None) or model_name)
+            yield f"data: {json.dumps(data)}\n\n"
+        if not saw_error:
+            yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
         yield "data: [DONE]\n\n"
     except Exception as e:
-        yield f"data: {json.dumps({'error': redact_error(e)})}\n\n"
+        yield f"data: {json.dumps(error_response(redact_error(e), 'upstream_error'))}\n\n"
         yield "data: [DONE]\n\n"
 
 
@@ -233,7 +305,7 @@ async def _sse_wrap(stream, model_name: str):
 async def list_models():
     db = await get_db()
     async with db.execute("""
-        SELECT m.model_id, m.display_name, m.context_length, p.name
+        SELECT m.model_id, m.display_name, m.context_length, p.name, m.provider_id
         FROM models m JOIN providers p ON m.provider_id = p.id
         WHERE m.active = 1 AND p.enabled = 1
     """) as cur:
@@ -241,7 +313,8 @@ async def list_models():
     return {
         "object": "list",
         "data": [
-            {"id": r[0], "object": "model", "created": int(time.time()), "owned_by": r[3]}
+            {"id": f"{r[4]}:{r[0]}", "object": "model", "created": int(time.time()),
+             "owned_by": r[3], "root": r[0], "context_length": r[2]}
             for r in rows
         ],
     }
@@ -348,10 +421,11 @@ async def dashboard():
 # ── Jobs ────────────────────────────────────────────────
 @app.post("/jobs")
 async def submit_job(req: JobSubmission):
-    messages = [m.model_dump() for m in req.messages]
+    messages = [m.model_dump(exclude_none=True) for m in req.messages]
     job_id = await _queue.submit_job(
         messages=messages, priority=req.priority,
         model_override=req.model, task_type=req.task_type,
+        params=req.passthrough_params(),
     )
     return {"job_id": job_id, "status": "pending"}
 

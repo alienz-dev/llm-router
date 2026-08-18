@@ -1,5 +1,5 @@
 server:
-  host: "0.0.0.0"
+  host: "127.0.0.1"   # loopback by default; deploy/README.md explains why
   port: 8642
 
 database:
@@ -9,6 +9,25 @@ scheduler:
   batch_window_start: "14:00"  # UTC — batch jobs only process in this window
   batch_window_end: "20:00"    # UTC — adjust to your timezone
   discovery_interval_hours: 6
+
+routing:
+  # Caller parameters that reach a provider. Cutting this back to
+  # [max_tokens, temperature, response_format] reverts tool calling and every
+  # other forwarded field in one edit — no code change, no redeploy of logic.
+  # messages / model / stream are never here: those are the router's to decide.
+  passthrough_params:
+    - max_tokens
+    - temperature
+    - response_format
+    - tools
+    - tool_choice
+    - parallel_tool_calls
+    - stream_options
+    - stop
+    - seed
+    - top_p
+    - n
+    - user
 
 providers:
   openrouter:

@@ -30,12 +30,30 @@ class ProviderConfig(BaseModel):
     account_id_env: str | None = None
     priority: float = 1.0
     timeout: int = 30
+    # Narrower than routing.passthrough_params for a provider that 400s on
+    # unknown fields. None means "use the global list".
+    passthrough_params: list[str] | None = None
+
+
+class RoutingConfig(BaseModel):
+    """Which caller-supplied parameters reach a provider.
+
+    This list is the kill switch for tool calling and every other forwarded
+    field: shorten it to `[max_tokens, temperature, response_format]` and the
+    router is back to its pre-tools behaviour in one edit, with no code change.
+    """
+
+    passthrough_params: list[str] = [
+        "max_tokens", "temperature", "response_format", "tools", "tool_choice",
+        "parallel_tool_calls", "stream_options", "stop", "seed", "top_p", "n", "user",
+    ]
 
 
 class Config(BaseModel):
     server: ServerConfig = ServerConfig()
     database: DatabaseConfig = DatabaseConfig()
     scheduler: SchedulerConfig = SchedulerConfig()
+    routing: RoutingConfig = RoutingConfig()
     providers: dict[str, ProviderConfig] = {}
 
 

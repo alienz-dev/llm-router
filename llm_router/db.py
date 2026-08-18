@@ -157,6 +157,9 @@ COLUMN_MIGRATIONS: list[tuple[str, str, str, str]] = [
     ("004_models_supports_json_schema", "models", "supports_json_schema", "INTEGER"),
     ("005_models_supports_vision", "models", "supports_vision", "INTEGER"),
     ("006_models_capability_checked_at", "models", "capability_checked_at", "TEXT"),
+    # A queued job's response_format / tools, so the batch path stops being a
+    # second endpoint with the sync path's old defect.
+    ("007_jobs_params", "jobs", "params", "TEXT"),
 ]
 
 

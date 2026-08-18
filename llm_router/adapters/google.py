@@ -2,10 +2,16 @@ import json
 import time
 from typing import AsyncIterator
 import httpx
-from .base import BaseAdapter, AdapterResponse, QuotaSnapshot
+from .base import BaseAdapter, AdapterResponse, QuotaSnapshot, content_chunk
 
 class GoogleAdapter(BaseAdapter):
     provider_name = "google"
+
+    # The adapter translates to Google's own generateContent shape, which this
+    # code does not express tools or response_format in. Native function calling
+    # is deliberately deferred — declaring it False keeps agent traffic away
+    # rather than letting it arrive and be silently dropped.
+    supports = {"tools": False, "json_schema": False, "streaming": True}
     
     def __init__(self, api_key: str):
         self.api_key = api_key
@@ -82,11 +88,10 @@ class GoogleAdapter(BaseAdapter):
         # Google streaming requires different endpoint - simplified non-streaming for now
         result = await self.chat_completion(messages, model_id, **kwargs)
         if "error" in result.response:
-            yield str(result.response.get("error", "Unknown error"))
+            yield {"error": result.response["error"], "status": result.status}
         else:
             content = result.response.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if content:
-                yield content
+            yield content_chunk(content, finish_reason="stop")
     
     async def list_models(self) -> list[dict]:
         try:

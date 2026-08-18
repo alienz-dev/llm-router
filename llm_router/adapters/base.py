@@ -43,8 +43,57 @@ class AdapterResponse:
     status: int | None = None
 
 
+def content_chunk(content: str, finish_reason: str | None = None) -> dict:
+    """A minimal OpenAI streaming chunk, for providers that have no stream of
+    their own and hand us the whole answer at once."""
+    return {"choices": [{"index": 0, "delta": {"content": content},
+                         "finish_reason": finish_reason}]}
+
+
 class BaseAdapter(ABC):
     provider_name: str
+
+    # What this adapter can express on the wire, regardless of the model behind
+    # it. A provider-level "no" is a hard ceiling: per-model probe results narrow
+    # within it and never widen it (ADR-01). A model that calls tools happily
+    # through OpenRouter does not gain tools through an adapter that flattens
+    # every message into a prompt string.
+    supports: dict[str, bool] = {"tools": True, "json_schema": True, "streaming": True}
+
+    # The router decided these. A caller-supplied `model` that reached the
+    # payload would re-target the upstream to something never scored, never
+    # quota-checked and never recorded.
+    RESERVED_PARAMS = frozenset({"messages", "model", "stream"})
+
+    def _allowed_params(self) -> set[str]:
+        """Caller parameters this provider is allowed to receive.
+
+        Some providers 400 on unknown fields, so forwarding everything blindly
+        turns requests that worked yesterday into failures — and those failures
+        would land on the model's health score.
+        """
+        from ..config import get_config
+
+        cfg = get_config()
+        provider = cfg.providers.get(self.provider_name)
+        if provider is not None and provider.passthrough_params is not None:
+            return set(provider.passthrough_params)
+        return set(cfg.routing.passthrough_params)
+
+    def _clean_params(self, kwargs: dict) -> dict:
+        """Strip what the caller must not set and what this provider will not take."""
+        allowed = self._allowed_params()
+        clean = {}
+        for key, value in kwargs.items():
+            if key in self.RESERVED_PARAMS:
+                logger.warning(
+                    "%s: dropping reserved parameter %r from a caller request",
+                    self.provider_name, key,
+                )
+                continue
+            if key in allowed:
+                clean[key] = value
+        return clean
 
     async def _retry_with_backoff(self, func, *args, **kwargs):
         """Retry with exponential backoff on 429/503 and connection errors.
@@ -144,11 +193,15 @@ class OpenAICompatibleAdapter(BaseAdapter):
 
         start_time = time.time()
 
+        params = self._clean_params(kwargs)
+
         async def _make_request():
             response = await self.client.post(
                 f"{self.base_url}/chat/completions",
                 headers=self._auth_headers(),
-                json={"messages": messages, "model": model_id, **kwargs},
+                # Router-owned keys last: they must win over anything a caller
+                # managed to smuggle through.
+                json={**params, "messages": messages, "model": model_id},
             )
             response.raise_for_status()
             return response
@@ -170,39 +223,55 @@ class OpenAICompatibleAdapter(BaseAdapter):
 
     async def stream_completion(
         self, messages: list[dict], model_id: str, **kwargs
-    ) -> AsyncIterator[str]:
-        # Pre-flight check
+    ) -> AsyncIterator[dict]:
+        """Yield the provider's chunks verbatim.
+
+        This used to extract `delta.content` and discard the rest, which meant
+        tool-call fragments — `index`, `id`, partial `arguments` — could not
+        survive the trip, and `usage` never arrived. Errors are yielded as
+        `{"error": …}` rather than as assistant content: a stream failure that
+        reads like a model answer is worse than one that fails.
+        """
         pre = self._pre_request(model_id)
         if pre is not None:
-            yield pre.response.get("error", "blocked")
+            yield {"error": pre.response.get("error", "blocked"), "status": pre.status}
             return
 
+        params = self._clean_params(kwargs)
         try:
             async with self.client.stream(
                 "POST",
                 f"{self.base_url}/chat/completions",
                 headers=self._auth_headers(),
-                json={"messages": messages, "model": model_id, "stream": True, **kwargs},
+                json={**params, "messages": messages, "model": model_id, "stream": True},
             ) as response:
                 response.raise_for_status()
                 async for line in response.aiter_lines():
-                    if line.startswith("data: ") and line.strip() != "data: [DONE]":
-                        try:
-                            chunk = json.loads(line[6:])
-                            content = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                            if content:
-                                yield content
-                        except json.JSONDecodeError:
-                            continue
+                    if not line.startswith("data: "):
+                        continue
+                    payload = line[6:].strip()
+                    if payload == "[DONE]":
+                        break
+                    try:
+                        yield json.loads(payload)
+                    except json.JSONDecodeError:
+                        continue
+        except httpx.HTTPStatusError as e:
+            try:
+                body = (await e.response.aread()).decode("utf-8", "replace")
+            except Exception:
+                body = ""
+            yield {"error": f"HTTP {e.response.status_code}: {redact(body)}",
+                   "status": e.response.status_code}
         except Exception as e:
-            yield redact_error(e)
+            yield {"error": redact_error(e)}
 
     async def generate_image(self, prompt: str, model_id: str, **kwargs) -> AdapterResponse:
         """Generate an image via OpenAI-compatible /v1/images/generations endpoint."""
         start_time = time.time()
 
         async def _make_request():
-            payload = {"prompt": prompt, "model": model_id, **kwargs}
+            payload = {**kwargs, "prompt": prompt, "model": model_id}
             response = await self.client.post(
                 f"{self.base_url}/images/generations",
                 headers=self._auth_headers(),

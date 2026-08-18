@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.llmrouter.heartbeat</string>
+
+    <!-- A separate job on purpose. Pinging from inside the server's own
+         scheduler means a wedged HTTP listener with a live scheduler keeps
+         reporting healthy, which is the failure this is meant to catch. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/bash</string>
+        <string>/Users/ding/projects/llm-router/scripts/heartbeat.sh</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/ding/projects/llm-router</string>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/Shared/hub/logs/llm-router-heartbeat.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/Shared/hub/logs/llm-router-heartbeat.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+        <key>HOME</key>
+        <string>/Users/ding</string>
+    </dict>
+</dict>
+</plist>

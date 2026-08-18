@@ -2,10 +2,14 @@ import json
 import time
 from typing import AsyncIterator
 import httpx
-from .base import BaseAdapter, AdapterResponse, QuotaSnapshot
+from .base import BaseAdapter, AdapterResponse, QuotaSnapshot, content_chunk
 
 class HuggingFaceAdapter(BaseAdapter):
     provider_name = "huggingface"
+
+    # Concatenates the conversation into a single prompt string. Nothing
+    # structured survives that, so it must never receive agent traffic.
+    supports = {"tools": False, "json_schema": False, "streaming": True}
     
     def __init__(self, api_token: str):
         self.api_token = api_token
@@ -89,11 +93,10 @@ class HuggingFaceAdapter(BaseAdapter):
         # HuggingFace doesn't support streaming - fallback to non-streaming
         result = await self.chat_completion(messages, model_id, **kwargs)
         if "error" in result.response:
-            yield str(result.response.get("error", "Unknown error"))
+            yield {"error": result.response["error"], "status": result.status}
         else:
             content = result.response.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if content:
-                yield content
+            yield content_chunk(content, finish_reason="stop")
     
     async def list_models(self) -> list[dict]:
         # HuggingFace has many models - return popular free ones
