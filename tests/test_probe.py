@@ -8,12 +8,11 @@ from llm_router.health import ModelHealthRepository
 
 class TestProbeEndpoints:
     def test_all_providers_have_endpoints(self):
-        expected = {
-            "openrouter", "google", "nvidia", "opencode",
-            "deepseek", "groq", "cerebras", "mistral",
-            "kilo", "cloudflare", "huggingface",
-        }
-        assert set(PROBE_ENDPOINTS.keys()) == expected
+        """Every provider in config.yaml must be probeable — derived, not hardcoded,
+        so adding a provider fails here instead of silently going unprobed."""
+        from llm_router.config import get_config
+
+        assert set(PROBE_ENDPOINTS.keys()) == set(get_config().providers.keys())
 
     def test_openai_compatible_endpoints(self):
         """Standard providers should have url, headers, body, key_env."""
@@ -52,11 +51,9 @@ class TestProbeEndpoints:
 class TestKnownLimits:
     def test_all_configured_providers_have_limits(self):
         """Every provider in config should have an entry (even if empty)."""
-        expected = {
-            "google", "openrouter", "cerebras", "groq", "mistral",
-            "nvidia", "opencode", "deepseek", "cloudflare", "huggingface", "kilo",
-        }
-        assert set(KNOWN_LIMITS.keys()) == expected
+        from llm_router.config import get_config
+
+        assert set(KNOWN_LIMITS.keys()) == set(get_config().providers.keys())
 
     def test_google_limits_structure(self):
         google = KNOWN_LIMITS["google"]
