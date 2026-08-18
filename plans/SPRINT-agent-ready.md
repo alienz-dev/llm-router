@@ -13,6 +13,10 @@ sprint, not this one.
 Draft reviewed adversarially 18 Aug 2026; the ticket order below is the post-review order, and
 every code reference in the diagnosis was re-verified against the working tree.
 
+**Progress:** Wave 0 and the first three tickets of Wave 1 are shipped on branch
+`sprint/agent-ready` — T0, T1, T2, T3, T4 done, T5 and T6 not started, Waves 2 and 3 not
+started. Current state is in `STATUS.md`; what shipped is in `CHANGELOG.md`.
+
 ---
 
 ## Why now — what was measured on 18 Aug 2026
@@ -155,7 +159,9 @@ missing capability, never a silent fall-through to a model that ignores it.
 
 ### Wave 0 — clear the ground (half a day, blocks everything)
 
-**T0 · Land or shelve the working tree.** +263 uncommitted lines sit across the exact files
+**✅ T0 · Land or shelve the working tree.** *SHIPPED (62c14f4) — plus the `error_response` NameError fix.*
+
+ +263 uncommitted lines sit across the exact files
 this sprint edits (`router.py` +153, `base.py` +34, `app.py` +20, `models.py` +13,
 `probe.py` +18, `discovery.py` +15) plus untracked `adapters/agnes.py`. It carries a live bug:
 `error_response` is imported function-locally at `app.py:156` inside `chat_completions` but
@@ -163,7 +169,9 @@ called at `app.py:182` in the image route — that error path raises `NameError`
 agent-ready models are Agnes models behind that untracked adapter.
 *Accept:* clean `git status`, image error path returns a 502 body instead of raising.
 
-**T1 · A schema migration mechanism.** `PRAGMA table_info` → `ALTER TABLE ADD COLUMN`, applied
+**✅ T1 · A schema migration mechanism.** *SHIPPED (e8e828d) — `schema_migrations` + six columns declared; test builds an old-schema database and migrates it.*
+
+ `PRAGMA table_info` → `ALTER TABLE ADD COLUMN`, applied
 idempotently at startup, plus a `schema_version` row. Nothing else in this sprint can add a
 column until this exists.
 *Owns:* `llm_router/db.py`.
@@ -175,7 +183,9 @@ new columns — not a test against a freshly-created schema.
 This wave alone makes the funnel safe to point at the router. It touches no message shapes and
 no capability system.
 
-**T2 · Forward `response_format`.** Add it to `ChatCompletionRequest` and pass it to the
+**✅ T2 · Forward `response_format`.** *SHIPPED (450df23).*
+
+ Add it to `ChatCompletionRequest` and pass it to the
 adapter. Nothing else — no `extra="allow"`, no tools, no message-shape change. Per ADR-01 the
 router never rewrites or downgrades it.
 *Owns:* `llm_router/models.py`, `llm_router/app.py`.
@@ -183,7 +193,9 @@ router never rewrites or downgrades it.
 router returns schema-conforming JSON; the same request to `deepseek:deepseek-v4-pro` returns
 DeepSeek's own 400.
 
-**T3 · Return the upstream status, not 502.** Carry the provider's status code on
+**✅ T3 · Return the upstream status, not 502.** *SHIPPED (450df23) — gate met: nexus falls back on attempt 0, DeepSeek path 4.0s.*
+
+ Carry the provider's status code on
 `AdapterResponse` (`adapters/base.py:30-36` has no status field today) and surface 4xx as 4xx.
 This is what lets nexus fall back immediately instead of retrying a 502 three times with
 backoff. Consumers of the `{"error": str}` convention all change: five sites in `router.py`,
@@ -197,7 +209,9 @@ capability refusal — today the loop swallows it into `"All fallback attempts f
 with no retry sleep; measured elapsed under 5s where today it is 3 retries with exponential
 backoff.
 
-**T4 · Discovery stops resurrecting dead models.** Remove the unconditional `active = 1` at
+**✅ T4 · Discovery stops resurrecting dead models.** *SHIPPED (1b70681).*
+
+ Remove the unconditional `active = 1` at
 `discovery.py:405-409`; add `deactivated_reason` and a backoff re-check so a transient 404 does
 not become a permanent graveyard (`probe.py:170` only probes `active = 1`, so a deactivated
 model is otherwise never seen again).
