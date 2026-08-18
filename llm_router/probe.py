@@ -7,6 +7,7 @@ from datetime import datetime, timedelta, timezone
 import httpx
 
 from .db import get_db
+from .redact import redact, redact_error
 from .health import ModelHealthRepository
 
 logger = logging.getLogger(__name__)
@@ -152,10 +153,14 @@ async def probe_model(client: httpx.AsyncClient, provider_id: str, model_id: str
         elif resp.status_code == 401:
             try:
                 err = resp.json().get("error", {})
-                msg = err.get("message", resp.text[:100])
+                msg = err.get("message", resp.text)
             except Exception:
-                msg = resp.text[:100]
-            return {"available": False, "error": f"auth/credits: {msg}", "latency_ms": latency}
+                msg = resp.text
+            # This string is written to model_health.last_probe_error, which
+            # /v1/models/health and /dashboard serve. Redact before truncating —
+            # truncating a key only makes it shorter.
+            return {"available": False, "error": f"auth/credits: {redact(msg)[:100]}",
+                    "latency_ms": latency}
         elif resp.status_code == 404:
             return {"available": False, "error": "model not found", "latency_ms": latency}
         else:
@@ -164,7 +169,7 @@ async def probe_model(client: httpx.AsyncClient, provider_id: str, model_id: str
     except httpx.TimeoutException:
         return {"available": False, "error": "timeout"}
     except Exception as e:
-        return {"available": False, "error": str(e)[:80]}
+        return {"available": False, "error": redact_error(e, 80)}
 
 
 async def probe_all_models() -> dict[str, dict[str, dict]]:
@@ -218,7 +223,7 @@ async def probe_all_models() -> dict[str, dict[str, dict]]:
         gathered = await asyncio.gather(*tasks, return_exceptions=True)
         for result in gathered:
             if isinstance(result, Exception):
-                logger.error("Probe failed: %s", result)
+                logger.error("Probe failed: %s", redact(result))
                 continue
             pid, probe_results = result
             results[pid] = probe_results

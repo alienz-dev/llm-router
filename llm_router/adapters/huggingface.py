@@ -1,6 +1,4 @@
-import asyncio
 import json
-import random
 import time
 from typing import AsyncIterator
 import httpx
@@ -13,24 +11,6 @@ class HuggingFaceAdapter(BaseAdapter):
         self.api_token = api_token
         self.base_url = "https://api-inference.huggingface.co/models"
         self.client = httpx.AsyncClient(timeout=30)
-    
-    async def _retry_with_backoff(self, func, *args, **kwargs):
-        for attempt in range(3):
-            try:
-                return await func(*args, **kwargs)
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code in (429, 503) and attempt < 2:
-                    wait = (2 ** attempt) + random.uniform(0, 1)
-                    await asyncio.sleep(wait)
-                    continue
-                return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
-                if attempt < 2:
-                    await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
-                    continue
-                return {"error": str(e)}
-            except Exception as e:
-                return {"error": str(e)}
     
     def _parse_quota(self, headers) -> QuotaSnapshot:
         # HuggingFace doesn't provide quota headers, return None for local tracking
@@ -91,7 +71,7 @@ class HuggingFaceAdapter(BaseAdapter):
         
         result = await self._retry_with_backoff(_make_request)
         if isinstance(result, dict) and "error" in result:
-            return AdapterResponse(result, None, 0, 0, (time.time() - start_time) * 1000)
+            return self._error_response(result, start_time)
         
         hf_data = result.json()
         openai_data = self._convert_from_hf_format(hf_data)

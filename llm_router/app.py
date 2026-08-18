@@ -1,4 +1,5 @@
 """FastAPI application with all routes."""
+import hmac
 import json
 import logging
 import os
@@ -19,6 +20,7 @@ from .models import (
     error_response,
 )
 from .quota import QuotaManager
+from .redact import redact_error
 from .queue import JobQueue
 from .router import SmartRouter
 from .scheduler import AppScheduler
@@ -39,11 +41,12 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         if request.url.path == "/health":
             return await call_next(request)
         auth = request.headers.get("authorization", "")
-        if auth == f"Bearer {self.api_key}":
+        # compare_digest, not ==: a plain comparison leaks the key one byte at a
+        # time to anyone who can time the response.
+        if hmac.compare_digest(auth, f"Bearer {self.api_key}"):
             return await call_next(request)
-        # Also allow query param for SSE clients that can't set headers
-        if request.query_params.get("key") == self.api_key:
-            return await call_next(request)
+        # No ?key= fallback: query strings land in access logs, proxy logs and
+        # Referer headers, which is exactly how this key would leak next.
         return Response(content='{"error":{"message":"Invalid API key","type":"auth_error"}}', status_code=401, media_type="application/json")
 
 # --- Globals wired in lifespan ---
@@ -221,7 +224,7 @@ async def _sse_wrap(stream, model_name: str):
         yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
         yield "data: [DONE]\n\n"
     except Exception as e:
-        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        yield f"data: {json.dumps({'error': redact_error(e)})}\n\n"
         yield "data: [DONE]\n\n"
 
 

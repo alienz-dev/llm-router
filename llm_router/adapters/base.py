@@ -11,6 +11,8 @@ from abc import ABC, abstractmethod
 
 import httpx
 
+from ..redact import redact, redact_error
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,6 +45,40 @@ class AdapterResponse:
 
 class BaseAdapter(ABC):
     provider_name: str
+
+    async def _retry_with_backoff(self, func, *args, **kwargs):
+        """Retry with exponential backoff on 429/503 and connection errors.
+
+        Every error string is redacted here, at the point of capture: these end
+        up in logs, in `model_health.last_probe_error`, and in the body the
+        caller receives, and a provider that echoes our Authorization header (or
+        a Google URL carrying `?key=`) would otherwise publish it.
+        """
+        for attempt in range(3):
+            try:
+                return await func(*args, **kwargs)
+            except httpx.HTTPStatusError as e:
+                if e.response.status_code in (429, 503) and attempt < 2:
+                    await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
+                    continue
+                return {
+                    "error": f"HTTP {e.response.status_code}: {redact(e.response.text)}",
+                    "status": e.response.status_code,
+                }
+            except (httpx.ConnectError, httpx.TimeoutException) as e:
+                if attempt < 2:
+                    await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
+                    continue
+                return {"error": redact_error(e)}
+            except Exception as e:
+                return {"error": redact_error(e)}
+
+    def _error_response(self, result: dict, start_time: float) -> "AdapterResponse":
+        """Wrap a failed request, keeping the upstream status off the wire body."""
+        status = result.pop("status", None)
+        return AdapterResponse(
+            result, None, 0, 0, (time.time() - start_time) * 1000, status=status
+        )
 
     @abstractmethod
     async def chat_completion(
@@ -97,35 +133,6 @@ class OpenAICompatibleAdapter(BaseAdapter):
         """Pre-flight check before making a request. Return an AdapterResponse
         to short-circuit (e.g., blocked model, no credits), or None to proceed."""
         return None
-
-    def _error_response(self, result: dict, start_time: float) -> AdapterResponse:
-        """Wrap a failed request, keeping the upstream status off the wire body."""
-        status = result.pop("status", None)
-        return AdapterResponse(
-            result, None, 0, 0, (time.time() - start_time) * 1000, status=status
-        )
-
-    async def _retry_with_backoff(self, func, *args, **kwargs):
-        """Retry with exponential backoff on 429/503 and connection errors."""
-        for attempt in range(3):
-            try:
-                return await func(*args, **kwargs)
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code in (429, 503) and attempt < 2:
-                    wait = (2 ** attempt) + random.uniform(0, 1)
-                    await asyncio.sleep(wait)
-                    continue
-                return {
-                    "error": f"HTTP {e.response.status_code}: {e.response.text}",
-                    "status": e.response.status_code,
-                }
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
-                if attempt < 2:
-                    await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
-                    continue
-                return {"error": str(e)}
-            except Exception as e:
-                return {"error": str(e)}
 
     async def chat_completion(
         self, messages: list[dict], model_id: str, **kwargs
@@ -188,7 +195,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
                         except json.JSONDecodeError:
                             continue
         except Exception as e:
-            yield str(e)
+            yield redact_error(e)
 
     async def generate_image(self, prompt: str, model_id: str, **kwargs) -> AdapterResponse:
         """Generate an image via OpenAI-compatible /v1/images/generations endpoint."""

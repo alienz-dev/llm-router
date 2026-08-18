@@ -6,6 +6,7 @@ import uuid
 from datetime import datetime, timezone
 
 from .db import get_db
+from .redact import redact
 
 logger = logging.getLogger(__name__)
 
@@ -87,7 +88,7 @@ class JobQueue:
                 await self._process_job(job_id)
                 processed += 1
             except Exception as e:
-                logger.error("Failed to process job %s: %s", job_id, e)
+                logger.error("Failed to process job %s: %s", job_id, redact(e))
         return processed
 
     async def _process_job(self, job_id: str) -> None:
@@ -138,7 +139,7 @@ class JobQueue:
             await db.commit()
 
         except Exception as e:
-            logger.error("Job %s failed (attempt %d): %s", job_id, retries + 1, e)
+            logger.error("Job %s failed (attempt %d): %s", job_id, retries + 1, redact(e))
             if retries < 3:
                 await db.execute(
                     "UPDATE jobs SET retries = retries + 1, status = 'pending' WHERE id = ?",

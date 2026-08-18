@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import httpx
 
 from .db import get_db
+from .redact import redact
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +112,8 @@ class ModelDiscovery:
         gathered = await asyncio.gather(*tasks.values(), return_exceptions=True)
         for provider_id, result in zip(tasks.keys(), gathered):
             if isinstance(result, Exception):
-                logger.error("Discovery failed for %s: %s", provider_id, result)
+                # httpx puts the request URL in the message, and Google's carries ?key=.
+                logger.error("Discovery failed for %s: %s", provider_id, redact(result))
                 results[provider_id] = []
             else:
                 results[provider_id] = result

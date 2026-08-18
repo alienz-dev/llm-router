@@ -10,6 +10,7 @@ from .config import get_config
 from .discovery import ModelDiscovery
 from .probe import run_probe_and_update
 from .queue import JobQueue
+from .redact import redact, redact_error
 
 logger = logging.getLogger(__name__)
 
@@ -91,7 +92,7 @@ class AppScheduler:
             if n:
                 logger.info("Processed %d batch jobs", n)
         except Exception as e:
-            logger.error("Batch processing failed: %s", e)
+            logger.error("Batch processing failed: %s", redact(e))
 
     async def _run_discovery(self):
         try:
@@ -103,7 +104,7 @@ class AppScheduler:
             removed = sum(s["removed"] for s in stats.values())
             logger.info("Discovery: %d active (+%d, -%d)", total, added, removed)
         except Exception as e:
-            logger.error("Discovery failed: %s", e)
+            logger.error("Discovery failed: %s", redact(e))
 
     async def _run_probe(self):
         try:
@@ -117,7 +118,7 @@ class AppScheduler:
             for d in stats.get("deactivated", []):
                 logger.warning("  Deactivated: %s", d)
         except Exception as e:
-            logger.error("Probe failed: %s", e)
+            logger.error("Probe failed: %s", redact(e))
 
     async def _run_recovery_probe(self):
         """Test providers in HALF_OPEN state to see if they've recovered.
@@ -167,11 +168,12 @@ class AppScheduler:
                         logger.info("Recovery probe FAIL: %s — %s (breaker stays OPEN)",
                             provider_id, error[:80])
                 except Exception as e:
-                    self._router.circuit_breaker.record_failure(provider_id, str(e))
-                    logger.info("Recovery probe ERROR: %s — %s", provider_id, str(e)[:80])
+                    # last_error is served by /v1/providers/health.
+                    self._router.circuit_breaker.record_failure(provider_id, redact_error(e))
+                    logger.info("Recovery probe ERROR: %s — %s", provider_id, redact_error(e, 80))
 
         except Exception as e:
-            logger.error("Recovery probe failed: %s", e)
+            logger.error("Recovery probe failed: %s", redact(e))
 
     async def _cleanup_quota_usage(self):
         """Delete quota_usage rows older than 48 hours to prevent unbounded growth."""
@@ -188,4 +190,4 @@ class AppScheduler:
             if deleted:
                 logger.info("Cleaned up %d old quota_usage rows", deleted)
         except Exception as e:
-            logger.error("Quota cleanup failed: %s", e)
+            logger.error("Quota cleanup failed: %s", redact(e))
