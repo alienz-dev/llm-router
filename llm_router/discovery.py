@@ -392,8 +392,11 @@ class ModelDiscovery:
             # Mark removed as inactive
             for mid in removed:
                 await db.execute(
-                    "UPDATE models SET active = 0 WHERE provider_id = ? AND model_id = ?",
-                    (provider_id, mid),
+                    """UPDATE models SET active = 0,
+                           deactivated_reason = COALESCE(deactivated_reason, 'no longer listed by provider'),
+                           deactivated_at = COALESCE(deactivated_at, ?)
+                       WHERE provider_id = ? AND model_id = ?""",
+                    (now, provider_id, mid),
                 )
 
             # Upsert discovered
@@ -406,7 +409,11 @@ class ModelDiscovery:
                        display_name = excluded.display_name,
                        context_length = excluded.context_length,
                        task_scores = excluded.task_scores,
-                       active = 1""",
+                       -- A provider keeps listing models that 404 when you call them.
+                       -- Discovery must not undo a deactivation the probe made from
+                       -- evidence; only the probe clears deactivated_reason.
+                       active = CASE WHEN models.deactivated_reason IS NULL
+                                     THEN 1 ELSE models.active END""",
                     (provider_id, m["model_id"], m["display_name"],
                      m["context_length"], m["task_scores"], now),
                 )

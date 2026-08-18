@@ -2,7 +2,7 @@
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -10,6 +10,11 @@ from .db import get_db
 from .health import ModelHealthRepository
 
 logger = logging.getLogger(__name__)
+
+# A model the probe switched off is re-checked this many days later. Without a
+# re-check a transient 404 is permanent: probe_all_models only looks at active
+# rows, and discovery no longer flips them back on.
+DEACTIVATED_RECHECK_DAYS = 7
 
 # Known free-tier quota limits (from research)
 KNOWN_LIMITS = {
@@ -166,8 +171,14 @@ async def probe_all_models() -> dict[str, dict[str, dict]]:
     """Probe all active models in the DB. Returns {provider_id: {model_id: probe_result}}."""
     import json as _json
     db = await get_db()
+    recheck_before = (
+        datetime.now(timezone.utc) - timedelta(days=DEACTIVATED_RECHECK_DAYS)
+    ).isoformat()
     async with db.execute(
-        "SELECT provider_id, model_id, task_scores FROM models WHERE active = 1"
+        """SELECT provider_id, model_id, task_scores FROM models
+           WHERE active = 1
+              OR (deactivated_at IS NOT NULL AND deactivated_at < ?)""",
+        (recheck_before,),
     ) as cur:
         models = await cur.fetchall()
 
@@ -250,7 +261,8 @@ async def run_probe_and_update() -> dict:
     db = await get_db()
     now = datetime.now(timezone.utc).isoformat()
     health_repo = ModelHealthRepository()
-    stats = {"probed": 0, "available": 0, "unavailable": 0, "deactivated": []}
+    stats = {"probed": 0, "available": 0, "unavailable": 0,
+             "deactivated": [], "reactivated": []}
 
     for provider_id, model_results in results.items():
         for model_id, probe in model_results.items():
@@ -266,8 +278,18 @@ async def run_probe_and_update() -> dict:
 
             if available:
                 stats["available"] += 1
+                async with db.execute(
+                    "SELECT active FROM models WHERE provider_id = ? AND model_id = ?",
+                    (provider_id, model_id),
+                ) as cur:
+                    row = await cur.fetchone()
+                if row and not row[0]:
+                    stats["reactivated"].append(f"{provider_id}:{model_id}")
+                    logger.info("Reactivated %s:%s — probe succeeded", provider_id, model_id)
                 await db.execute(
-                    "UPDATE models SET active = 1 WHERE provider_id = ? AND model_id = ?",
+                    """UPDATE models SET active = 1, deactivated_reason = NULL,
+                           deactivated_at = NULL
+                       WHERE provider_id = ? AND model_id = ?""",
                     (provider_id, model_id),
                 )
             else:
@@ -275,8 +297,10 @@ async def run_probe_and_update() -> dict:
                 error = error or "unknown"
                 if "auth/credits" in error or "not found" in error:
                     await db.execute(
-                        "UPDATE models SET active = 0 WHERE provider_id = ? AND model_id = ?",
-                        (provider_id, model_id),
+                        """UPDATE models SET active = 0, deactivated_reason = ?,
+                               deactivated_at = ?
+                           WHERE provider_id = ? AND model_id = ?""",
+                        (error, now, provider_id, model_id),
                     )
                     stats["deactivated"].append(f"{provider_id}:{model_id} ({error})")
                     logger.warning("Deactivated %s:%s - %s", provider_id, model_id, error)
