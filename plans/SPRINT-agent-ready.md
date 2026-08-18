@@ -13,9 +13,10 @@ sprint, not this one.
 Draft reviewed adversarially 18 Aug 2026; the ticket order below is the post-review order, and
 every code reference in the diagnosis was re-verified against the working tree.
 
-**Progress:** Wave 0 and the first three tickets of Wave 1 are shipped on branch
-`sprint/agent-ready` — T0, T1, T2, T3, T4 done, T5 and T6 not started, Waves 2 and 3 not
-started. Current state is in `STATUS.md`; what shipped is in `CHANGELOG.md`.
+**Progress:** every ticket is shipped on branch `sprint/agent-ready` except the
+deployment half of T6 — the artifacts exist and are tested, but the branch has not been
+pushed to agent-mini, so nothing is running there yet. Current state is in `STATUS.md`;
+what shipped is in `CHANGELOG.md`.
 
 ---
 
@@ -219,6 +220,8 @@ model is otherwise never seen again).
 *Accept:* the six NVIDIA 404s stay `active = 0` across a discovery run; a model deactivated
 7 days ago is re-checked once.
 
+**✅ T5 · Stop logging secrets.** *SHIPPED (66cc2b8) — redaction at the point of capture; `compare_digest`; no `?key=` fallback. Rotating `GOOGLE_AI_API_KEY` is still outstanding and is Ming's to do.*
+
 **T5 · Stop logging secrets.** Redact query strings and `Authorization` headers at the point of
 capture, not at the point of logging — the sinks are `discovery.py:114`, `probe.py:73-77`,
 `google.py:79,114`, and `probe.py:161-162` which writes the error into `model_health`, served
@@ -228,6 +231,8 @@ auth fallback at `app.py:40`.
 *Owns:* `discovery.py`, `probe.py`, `adapters/google.py`, `app.py`.
 *Accept:* after a forced failure, `grep -r AIza` across logs **and** a scan of
 `model_health.last_probe_error` **and** the `/v1/models/health` response all return nothing.
+
+**◐ T6 · Deploy on agent-mini, properly.** *ARTIFACTS SHIPPED (c947c6c) — launchd plists, idempotent installer, dedicated heartbeat job, a `/health` that asserts a DB round-trip and a live adapter, systemd unit deleted. NOT INSTALLED: pushing the branch to agent-mini needs an approval this session did not have. Commands are in `STATUS.md`.*
 
 **T6 · Deploy on agent-mini, properly.** launchd plist (not the repo's systemd unit), an
 explicit bind decision (`127.0.0.1` unless something off-box needs it) with `API_KEY` set
@@ -241,6 +246,8 @@ before.
 process pages within the stated grace period.
 
 ### Wave 2 — the agent wire (one day; T7 and T8 ship together or not at all)
+
+**✅ T7 · Message shape and tool parameters.** *SHIPPED (c947c6c) — reserved-key deny-list, per-provider allow-list, and `routing.passthrough_params` as the kill switch.*
 
 **T7 · Message shape and tool parameters.** `ChatMessage.content: str | list[dict] | None`,
 plus `tool_calls`, `tool_call_id`, `name`; request gains `tools`, `tool_choice`,
@@ -261,6 +268,8 @@ content arrays, and `router.py:409-411` guards `classify_task` with `isinstance(
 `tool_calls` with non-empty `id` and `finish_reason: "tool_calls"`; a body carrying
 `"model"` as an extra key does not change the upstream target.
 
+**✅ T8 · Stream the whole delta, and meter it.** *SHIPPED (c947c6c) — verified live: a streamed tool call reassembles, usage arrives before `[DONE]`, and the request lands in `quota_usage`.*
+
 **T8 · Stream the whole delta, and meter it.** Pass the provider's `delta` through verbatim so
 `tool_calls` fragments keep `index`/`id`/partial `arguments`; honour
 `stream_options.include_usage`; stop yielding exception strings as assistant content
@@ -272,6 +281,8 @@ completion replaces today's wrong-but-visible prose. If T8 must slip, T7 ships w
 *Owns:* `adapters/base.py`, `app.py:190-204`, `router.py:72-75,336-337,393-394`.
 *Accept:* a streamed tool call reassembles into valid JSON arguments; the last chunk before
 `[DONE]` carries `usage`; a streamed request increments quota usage.
+
+**✅ T9 · Capability enforcement, in one place, on every path.** *SHIPPED (c947c6c).*
 
 **T9 · Capability enforcement, in one place, on every path.** `BaseAdapter` declares
 `supports = {"tools": …, "json_schema": …, "streaming": …}`; `google`, `cloudflare` and
@@ -288,6 +299,8 @@ at 3 — five schema refusals would evict a healthy model from `auto`.
 `tools: False`, at any position in any of the three paths; five refusals leave the model's
 health score unchanged.
 
+**✅ T10 · The batch path gets the same treatment.** *SHIPPED (c947c6c).*
+
 **T10 · The batch path gets the same treatment.** `queue.py:116` calls `route()` with no
 kwargs, so a queued job's `tools`/`response_format` are dropped exactly as the sync path drops
 them today — the same defect at a second endpoint.
@@ -295,6 +308,8 @@ them today — the same defect at a second endpoint.
 *Accept:* a queued job with `response_format` produces schema-conforming output.
 
 ### Wave 3 — capability data and proof (one day)
+
+**✅ T11 · Capability columns, on a budget.** *SHIPPED (8d5ec1c).*
 
 **T11 · Capability columns, on a budget.** `supports_tools`, `supports_json_schema`,
 `supports_vision`, `capability_checked_at` on `models`, via T1's migration, seeded from
@@ -307,6 +322,8 @@ reads `capability_checked_at` and skips fresh rows.
 *Accept:* an old-schema database migrates and the nine known agent-ready models carry
 `supports_tools = 1`; a second run inside the freshness window makes zero provider calls.
 
+**✅ T12 · Hermetic tests.** *SHIPPED (4c71528) — 124 tests, and the suite now fails any attempt to reach the network.*
+
 **T12 · Hermetic tests.** Every acceptance criterion above that hits a live provider is
 non-repeatable against a 50/day budget. Capture fixtures for the `tool_calls` shape, DeepSeek's
 `response_format` 400, and a streaming tool-call delta sequence. This also unblocks the rest:
@@ -316,6 +333,8 @@ the dev database, and `tests/test_router.py` re-implements the scoring formula i
 file because it cannot reach the real one.
 *Owns:* `tests/`, `db.py`.
 *Accept:* the suite passes with no network access.
+
+**✅ T13 · Prove it against the real consumer.** *SHIPPED (4c71528) — `bash scripts/agent_gate.sh`, green. The schema-refusing case moved off DeepSeek: that account returns HTTP 402 Insufficient Balance.*
 
 **T13 · Prove it against the real consumer.** A nexus `callStructured` run through the router —
 the funnel's judge prompt, 10 real listings, all 10 parsing — plus a LangGraph

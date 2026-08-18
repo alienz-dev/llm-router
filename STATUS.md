@@ -7,63 +7,94 @@ Current state only. Rewritten in place, never appended. History lives in `CHANGE
 - **OpenAI-compatible API** on `:8642` — `/v1/chat/completions` (sync + SSE),
   `/v1/models`, `/v1/images/generations`, plus `/v1/quota`, `/v1/providers/health`,
   `/v1/models/health`, `/dashboard`, and the `/jobs` batch endpoints.
-- **12 provider adapters**, 6 with keys set: openrouter, google, nvidia, deepseek, opencode,
-  agnes. The other 6 (cerebras, groq, mistral, kilo, cloudflare, huggingface) are configured
-  and idle.
-- **Smart routing** — task classification, availability scoring
-  (`capability × (quota_headroom + 0.1) × availability × provider_priority`), a fallback
-  chain, per-provider circuit breakers persisted across restarts, and sliding-window quota
-  tracking.
-- **Structured output works end to end.** `response_format` is forwarded verbatim and never
-  rewritten; providers that refuse `json_schema` return their own 400, fast, so a caller's
-  fallback fires instead of retrying a 502. Proven against the real consumer by
-  `scripts/nexus_gate.ts` (nexus `callStructured`, three cases).
-- **Schema migrations** — additive columns applied idempotently at startup and recorded in
-  `schema_migrations`. `DATABASE_PATH` is honoured, so tests no longer write the dev database.
-- **Model lifecycle is coherent** — the probe's verdict wins over discovery's listing;
-  deactivations carry a reason and timestamp and are re-probed after 7 days.
-- **Tests:** `uv run pytest tests/` — 67 tests, ~1.3s, no network. The live-server smoke
-  script is `scripts/smoke_live_server.py` and is not part of that run.
+- **12 provider adapters**, 6 with keys set: openrouter, google, nvidia, deepseek,
+  opencode, agnes. The other 6 (cerebras, groq, mistral, kilo, cloudflare,
+  huggingface) are configured and idle.
+- **Agent traffic works end to end.** `tools` / `tool_choice` are forwarded, an
+  assistant message with `content: null` + `tool_calls` and a `role: "tool"` reply
+  both round-trip, and multimodal content arrays are accepted. Proven live by a
+  LangGraph `create_react_agent` turn through the router.
+- **Streaming carries the whole delta and is metered.** Provider chunks pass through
+  verbatim, so a streamed tool call reassembles into valid JSON arguments;
+  `stream_options.include_usage` is honoured; the router no longer overwrites the
+  provider's `finish_reason`; and streamed requests record quota, health and
+  circuit-breaker success, which they previously bypassed entirely.
+- **Structured output is honest.** `response_format` is forwarded verbatim and never
+  rewritten. A model known not to support a strict schema is refused with a 400 the
+  caller's own fallback recognises, rather than answering with prose.
+- **Routing is capability-aware** on all three paths — `auto`, direct, and the family
+  fallback. Zero capable candidates is an explicit 400. A provider's refusal
+  (400/422) is returned immediately and does not count as ill health; it narrows
+  that model's capability flags instead.
+- **Per-model capability flags** are seeded from the verified inventory, dated by the
+  file, and re-probed weekly with a per-provider budget. NULL means unknown.
+- **Secrets are redacted at the point of capture** — logs, `model_health`, circuit
+  breaker state and the body a caller receives. `API_KEY` auth uses
+  `hmac.compare_digest` and no longer accepts a key in the query string.
+- **Batch jobs carry their parameters.** A queued job's `response_format` / `tools`
+  reach the provider.
+- **Tests:** `uv run pytest tests/` — 124 tests, ~1.5s, and the suite now *enforces*
+  no network: a connect to anything but loopback fails with a pointer to
+  `tests/fixtures/`.
+- **The live gate:** `bash scripts/agent_gate.sh` — nexus `callStructured` (three
+  cases) plus a LangGraph ReAct turn, against real providers. Currently green.
+  Costs roughly 10 free-tier requests.
 
 ## In progress
 
-- Branch **`sprint/agent-ready`** — 5 commits ahead of `master`, unmerged, unpushed. Contains
-  everything above plus the carried-over image-generation and Agnes work. The plan it
-  executes is `plans/SPRINT-agent-ready.md`.
+- Branch **`sprint/agent-ready`** — 9 commits ahead of `master`, unmerged, unpushed.
+  It executes `plans/SPRINT-agent-ready.md`; every ticket is done except the deploy.
 
 ## Known broken
 
-- **Tool calling does not work.** `tools`/`tool_choice` are dropped silently (HTTP 200, model
-  answers as if it had no tools). Assistant messages with `content: null` + `tool_calls`, and
-  `role: "tool"` messages, are rejected with 422 — so a LangGraph agent dies on turn 2.
-- **Streaming is thin and unmetered.** Only `delta.content` survives; `stream_options.include_usage`
-  is ignored; streamed requests bypass quota recording, health updates and the circuit breaker
-  entirely. A stream failure is yielded as assistant content.
-- **No per-model capability metadata.** The columns exist (migrations 003-006) but nothing
-  fills or reads them, so routing cannot avoid a model that ignores tools or refuses schemas.
-- **API keys leak.** `discovery.py:114`, `probe.py:73`, `google.py:79,114` log URLs containing
-  `?key=`, and `probe.py` writes the error into `model_health.last_probe_error`, which
-  `/v1/models/health` and `/dashboard` serve without auth by default. `GOOGLE_AI_API_KEY` is
-  in `llm-router.log` in plaintext and needs rotating.
-- **Batch jobs drop request parameters.** `queue.py:116` calls `route()` with no kwargs, so a
-  queued job loses `response_format` exactly as the sync path used to.
-- **Not deployed.** agent-mini has no launchd job and nothing listening on 8642; its database
-  was last written 27 Jul. `llm-router.service` in this repo is a systemd unit, which
-  agent-mini does not use.
-- **`/v1/models` returns bare model ids** without the provider prefix, so ids collide across
-  providers and a client cannot pick one for direct routing from that list.
+- **Still not deployed, and the deploy is one command away.** `deploy/` holds the
+  launchd plists, an idempotent installer and the runbook; `/health` asserts a
+  database round-trip and a live adapter; `scripts/heartbeat.sh` is a dedicated
+  job. What is missing is getting this branch onto agent-mini, which needs a push:
+
+      git push ssh://agent/Users/ding/projects/llm-router sprint/agent-ready
+      ssh agent 'cd ~/projects/llm-router && git checkout sprint/agent-ready && uv sync'
+      ssh agent 'echo "API_KEY=$(openssl rand -hex 24)" >> ~/projects/llm-router/.env'
+      ssh agent 'cd ~/projects/llm-router && bash deploy/install.sh'
+
+  agent-mini's uncommitted pre-switch state is saved at
+  `~/llm-router-preswitch-20260819.patch`.
+- **agent-mini is running the old build, exposed.** A hand-started process is
+  listening on `*:8642` — every interface, no `API_KEY`, pre-redaction code. That is
+  an unauthenticated pass-through to eleven provider accounts on the LAN. The deploy
+  above replaces it with a loopback-bound, authenticated launchd job.
+- **`GOOGLE_AI_API_KEY` is in plaintext** in `/Users/ding/projects/llm-router/llm-router.log`
+  on agent-mini and needs rotating. New leaks are closed; this one predates the fix.
+- **The DeepSeek account has no balance** — every call returns HTTP 402. This is not
+  a router fault, and it also means job-hunter's DeepSeek-direct default is dead.
+- **Nothing is watching the service.** `HEALTHCHECKS_URL` is unset, so the heartbeat
+  checks and logs but pages nobody. Create a check with a 10-minute period.
+- **Google, Cloudflare and HuggingFace declare `tools: False`** and are excluded from
+  agent traffic by design. Google's native function-calling translation is deferred,
+  not attempted and broken.
+- **Reasoning models leak their scratchpad into `content`** — `nemotron-3.5-lightning`
+  returns its full "Here's a thinking process:" preamble as message content. Unowned
+  by any ticket; either consumers tolerate it or the router splits `reasoning` out.
+- **Six providers have no key set** (cerebras, groq, mistral, kilo, cloudflare,
+  huggingface) and are dead weight in scoring. Groq is the strongest free
+  tool-calling tier available — 30 RPM / 14,400 RPD — and a signup is worth more
+  than any routing change.
 
 ## Next
 
-1. Redact secrets at the point of capture, then rotate `GOOGLE_AI_API_KEY`.
-2. Deploy on agent-mini — launchd, explicit bind, `API_KEY` set, a `/health` that asserts a
-   DB round-trip, and a heartbeat from a dedicated job.
-3. Then either the agent wire (tools + streaming, which must ship together) or the
-   job-hunter cutover — see `plans/`.
+1. Deploy (the four commands above), then rotate `GOOGLE_AI_API_KEY`.
+2. Set `HEALTHCHECKS_URL` so a dead router pages instead of going unnoticed.
+3. Sign up for Groq; it changes what `auto` can do for agent traffic more than
+   anything left in the code.
+4. Then the job-hunter cutover — its `LlmProvider` seam (DESIGN.md D11) is what this
+   sprint made implementable. That is job-hunter's ticket to schedule, and its
+   DeepSeek-direct default must not switch until the router has run green for a week.
 
 ## Reference
 
+- Deployment runbook: `deploy/README.md`.
 - Verified model capabilities: `docs/model-capabilities-2026-08-18.json`
-  (33 models probed; 18 return native `tool_calls`, 9 also honour strict `json_schema`).
-  Re-run with `uv run python scripts/probe_capabilities.py`.
+  (33 models probed; 18 return native `tool_calls`, 9 also honour strict
+  `json_schema`). Refresh with `uv run python scripts/probe_capabilities.py`.
+- The passthrough kill switch is `routing.passthrough_params` in `config.yaml`.
 - Machine roles and where this should run: the `env` skill.
