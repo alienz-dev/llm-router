@@ -1,3 +1,4 @@
+import asyncio
 import json
 import re
 import logging
@@ -23,6 +24,13 @@ logger = logging.getLogger(__name__)
 # They are also not worth retrying elsewhere: the caller's own fallback path is
 # what should run, and it only runs if it sees the refusal (ADR-01).
 _REQUEST_SHAPED_STATUSES = frozenset({400, 422})
+
+# How many DISTINCT providers one `auto` request may try. Candidates are scored
+# per model, and one provider can own every top slot — OpenRouter is 20 of 36
+# routable models at the highest priority. Since a failure marks the whole
+# provider failed, five OpenRouter candidates meant one attempt and four skips:
+# a 429 killed the request without agnes, nvidia or opencode ever being asked.
+FALLBACK_PROVIDERS = 3
 
 
 def required_capabilities(params: dict, stream: bool = False) -> set[str]:
@@ -132,7 +140,7 @@ class SmartRouter:
         last_error = None
         last_status = None
         failed_providers = set()
-        for candidate in candidates[:5]:
+        for candidate in self._spread_across_providers(candidates):
             # Skip providers that already failed in this request
             if candidate.provider_id in failed_providers:
                 continue
@@ -390,15 +398,18 @@ class SmartRouter:
             # Fall back to provider:model parsing
             provider_id, model_id = model_override.split(":", 1)
         else:
+            # 404, not 502: the caller named something that does not exist, and
+            # retrying will not change that. The image path five hundred lines
+            # up already got this right.
             return AdapterResponse(
                 response={"error": f"Model not found: {model_override}"},
-                quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+                quota=None, tokens_in=0, tokens_out=0, latency_ms=0, status=404,
             )
 
         if provider_id not in self.adapters:
             return AdapterResponse(
                 response={"error": f"Unknown provider: {provider_id}"},
-                quota=None, tokens_in=0, tokens_out=0, latency_ms=0,
+                quota=None, tokens_in=0, tokens_out=0, latency_ms=0, status=404,
             )
 
         # Capability gate, before anything is spent. A direct route is the path
@@ -536,6 +547,28 @@ class SmartRouter:
                 return response
         return None
 
+    @staticmethod
+    def _spread_across_providers(
+        candidates: list[ModelCandidate], limit: int = FALLBACK_PROVIDERS
+    ) -> list[ModelCandidate]:
+        """The best candidate from each of the first `limit` distinct providers.
+
+        Taking the top N models instead meant the fallback chain could be one
+        provider N times over — and one failure retires all of them at once,
+        because failure is tracked per provider. Spreading is the difference
+        between "OpenRouter is rate limited" ending the request and it moving on.
+        """
+        chosen: list[ModelCandidate] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate.provider_id in seen:
+                continue
+            seen.add(candidate.provider_id)
+            chosen.append(candidate)
+            if len(chosen) >= limit:
+                break
+        return chosen
+
     async def _metered_stream(
         self, provider_id: str, model_id: str, source: AsyncIterator[dict],
         messages: list[dict], params: dict, meta: dict,
@@ -553,13 +586,37 @@ class SmartRouter:
         usage: dict | None = None
         completion_chars = 0
         first = True
+        settled = False
 
         async def _fail(error: str) -> None:
+            nonlocal settled
+            if settled:
+                return
+            settled = True
             self.circuit_breaker.record_failure(provider_id, error)
             await self.quota_manager.record_usage(provider_id, model_id, 0, 0, False)
             await self.health_repo.update(
                 provider_id, model_id, success=False, error=error
             )
+
+        async def _succeed() -> tuple[int, int]:
+            nonlocal settled
+            tokens_in = (usage or {}).get("prompt_tokens", estimated_in)
+            tokens_out = (usage or {}).get(
+                "completion_tokens", max(1, completion_chars // 4)
+            )
+            if settled:
+                return tokens_in, tokens_out
+            settled = True
+            self.circuit_breaker.record_success(provider_id)
+            await self.quota_manager.record_usage(
+                provider_id, model_id, tokens_in, tokens_out, True
+            )
+            await self.health_repo.update(
+                provider_id, model_id, success=True,
+                latency_ms=(time.monotonic() - started) * 1000,
+            )
+            return tokens_in, tokens_out
 
         try:
             async for chunk in source:
@@ -586,24 +643,22 @@ class SmartRouter:
                     chunk.setdefault("_router", meta)
                     first = False
                 yield chunk
+        except GeneratorExit:
+            # The client hung up. The upstream request was still made and still
+            # counted against the free tier, so it has to be booked — but a
+            # closing async generator must not await its own cleanup, so hand
+            # the write to the loop and let the close finish.
+            asyncio.get_running_loop().create_task(_succeed())
+            raise
         except Exception as e:
             from .redact import redact_error
 
-            error = redact_error(e)
+            error = redact_error(e) or type(e).__name__
             await _fail(error)
             yield {"error": error}
             return
 
-        tokens_in = (usage or {}).get("prompt_tokens", estimated_in)
-        tokens_out = (usage or {}).get("completion_tokens", max(1, completion_chars // 4))
-        self.circuit_breaker.record_success(provider_id)
-        await self.quota_manager.record_usage(
-            provider_id, model_id, tokens_in, tokens_out, True
-        )
-        await self.health_repo.update(
-            provider_id, model_id, success=True,
-            latency_ms=(time.monotonic() - started) * 1000,
-        )
+        tokens_in, tokens_out = await _succeed()
 
         wants_usage = bool((params.get("stream_options") or {}).get("include_usage"))
         if wants_usage and usage is None:
@@ -759,11 +814,17 @@ class SmartRouter:
                     probe_age_h = (now - probe_time).total_seconds() / 3600
                 except (ValueError, TypeError):
                     probe_age_h = 999
-                if probe_age_h < 2:
+                # Bands follow the probe rotation (PROBE_MIN_AGE_HOURS = 24).
+                # They used to assume a 2-hourly sweep of every model, which is
+                # what made that sweep cost 240 requests a day; against a 24h
+                # rotation those bands would have parked every model at 0.1.
+                # Real traffic writes last_probe_at too, so a model in use stays
+                # at the top band without ever being probed.
+                if probe_age_h < 24:
                     freshness = 1.0
-                elif probe_age_h < 6:
+                elif probe_age_h < 72:
                     freshness = 0.7
-                elif probe_age_h < 24:
+                elif probe_age_h < 24 * 7:
                     freshness = 0.4
                 else:
                     freshness = 0.1

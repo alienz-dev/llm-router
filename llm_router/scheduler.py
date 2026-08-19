@@ -39,10 +39,10 @@ class AppScheduler:
             await self._run_discovery()
         else:
             logger.info("Skipping startup discovery — model list is fresh")
-        if await self._hours_since("SELECT MAX(last_probe_at) FROM model_health") >= 2:
-            await self._run_probe()
-        else:
-            logger.info("Skipping startup probe — health data is fresh")
+        # No gate here any more: probe_all_models decides per model, on its own
+        # staleness window and per-provider budget, and makes zero calls when
+        # nothing is stale. A second threshold here could only disagree with it.
+        await self._run_probe()
 
         start_hour = int(cfg.scheduler.batch_window_start.split(":")[0])
         end_hour = int(cfg.scheduler.batch_window_end.split(":")[0])

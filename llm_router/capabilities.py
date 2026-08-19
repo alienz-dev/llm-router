@@ -236,12 +236,18 @@ async def probe_one(client: httpx.AsyncClient, provider_id: str, model_id: str) 
     """Two calls against the provider's own endpoint: a tool call and a strict schema."""
     from .config import get_config
 
+    # Every return from here carries provider/model: the caller reads them off
+    # the record, and an early return without them took down the whole cycle,
+    # not just this model.
+    unknown = {"provider": provider_id, "model": model_id,
+               "tools_note": "", "json_note": ""}
+
     provider = get_config().providers.get(provider_id)
     if not provider:
-        return {"tools": "no-config", "json": "no-config"}
+        return {**unknown, "tools": "no-config", "json": "no-config"}
     api_key = os.getenv(provider.api_key_env, "")
     if not api_key:
-        return {"tools": "no-key", "json": "no-key"}
+        return {**unknown, "tools": "no-key", "json": "no-key"}
 
     url = provider.base_url.rstrip("/") + "/chat/completions"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
@@ -315,8 +321,12 @@ async def run_capability_probe(
             continue
         for record in group:
             results.append(record)
-            flags = flags_from_verdicts(record["tools"], record["json"])
-            if await record_capability(record["provider"], record["model"], flags):
+            provider_id, model_id = record.get("provider"), record.get("model")
+            if not provider_id or not model_id:
+                logger.warning("Capability probe returned a record with no model: %r", record)
+                continue
+            flags = flags_from_verdicts(record.get("tools", ""), record.get("json", ""))
+            if await record_capability(provider_id, model_id, flags):
                 updated += 1
 
     logger.info("Capability probe: %d models, %d flags updated", len(results), updated)

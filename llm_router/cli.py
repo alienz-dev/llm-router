@@ -8,7 +8,9 @@ from .config import get_config
 @click.group()
 def main():
     """LLM Router — Free-Tier LLM Gateway"""
-    pass
+    from .logging_setup import configure_logging
+
+    configure_logging()
 
 
 @main.command()

@@ -13,6 +13,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from .adapters import ADAPTERS
 from .capabilities import seed_from_inventory
+from .logging_setup import configure_logging
 from .db import get_db, close_db
 from .adapters.base import AdapterResponse
 from .models import (
@@ -100,6 +101,7 @@ async def _seed_providers():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _router, _quota, _queue, _scheduler
+    configure_logging()
     await get_db()
     await _seed_providers()
     # Idempotent: only fills rows that have never been checked, so a live probe
@@ -375,7 +377,9 @@ async def model_health():
         rows = await cur.fetchall()
     models = []
     for r in rows:
-        total = (r[7] or 0) + (r[8] or 0)
+        # success_count + failure_count. This read r[7] (avg_latency_ms) for
+        # years, so every model reported a success rate near zero.
+        total = (r[8] or 0) + (r[9] or 0)
         models.append({
             "provider_id": r[0], "model_id": r[1], "display_name": r[10],
             "last_probe_at": r[2], "last_probe_ok": bool(r[3]),

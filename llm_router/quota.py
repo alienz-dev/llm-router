@@ -1,9 +1,12 @@
 import asyncio
 import json
+import logging
 from datetime import datetime, timezone, timedelta
 
 from .db import get_db
 from .adapters.base import QuotaSnapshot
+
+logger = logging.getLogger(__name__)
 
 
 class QuotaManager:
@@ -25,18 +28,11 @@ class QuotaManager:
                         total_text += item.get("text", "")
         return max(1, len(total_text) // 4)
 
-    async def can_use(
-        self, provider: str, model_id: str, estimated_tokens: int
-    ) -> bool:
-        """Check RPM + TPM against sliding window usage AND known limits.
-        Uses a single query for all usage data instead of 4 separate queries."""
+    async def _window_starts(self, provider: str) -> tuple[str, str, str]:
+        """(minute, hour, day) window starts as ISO strings, honouring the
+        provider's own daily reset hour."""
         db = await get_db()
         now = datetime.now(timezone.utc)
-        limits = await self._get_limits(provider, model_id)
-        if not limits:
-            return True
-
-        # Get daily reset hour
         async with db.execute(
             "SELECT daily_reset_utc_hour FROM providers WHERE id = ?", (provider,)
         ) as cursor:
@@ -47,43 +43,84 @@ class QuotaManager:
         if now.hour < reset_hour:
             daily_start -= timedelta(days=1)
 
-        minute_ago = (now - timedelta(minutes=1)).isoformat()
-        daily_iso = daily_start.isoformat()
-        total_estimated = estimated_tokens + 1024  # expected completion
+        return (
+            (now - timedelta(minutes=1)).isoformat(),
+            (now - timedelta(hours=1)).isoformat(),
+            daily_start.isoformat(),
+        )
 
-        # Single query: get minute + daily usage in one shot
-        usage_q = """
-            SELECT
-                SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END) AS rpm_count,
-                SUM(CASE WHEN timestamp >= ? THEN tokens_in + tokens_out ELSE 0 END) AS tpm_used,
-                SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END) AS rpd_count,
-                SUM(CASE WHEN timestamp >= ? THEN tokens_in + tokens_out ELSE 0 END) AS tpd_used
-            FROM quota_usage
-            WHERE provider_id = ? AND model_id = ? AND success = 1
-              AND timestamp >= ?
-        """
+    async def _usage(
+        self, provider: str, model_id: str | None, minute: str, hour: str, day: str
+    ) -> dict[str, int]:
+        """Successful usage in each window. `model_id=None` counts the whole
+        account, which is what an account-wide cap has to be measured against."""
+        db = await get_db()
+        scope = "" if model_id is None else " AND model_id = ?"
+        args: list = [minute, minute, hour, hour, day, day, provider]
+        if model_id is not None:
+            args.append(model_id)
+        args.append(day)
+
         async with db.execute(
-            usage_q,
-            (minute_ago, minute_ago, daily_iso, daily_iso,
-             provider, model_id, daily_iso),
+            f"""
+            SELECT
+                SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END),
+                SUM(CASE WHEN timestamp >= ? THEN tokens_in + tokens_out ELSE 0 END),
+                SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END),
+                SUM(CASE WHEN timestamp >= ? THEN tokens_in + tokens_out ELSE 0 END),
+                SUM(CASE WHEN timestamp >= ? THEN 1 ELSE 0 END),
+                SUM(CASE WHEN timestamp >= ? THEN tokens_in + tokens_out ELSE 0 END)
+            FROM quota_usage
+            WHERE provider_id = ?{scope} AND success = 1 AND timestamp >= ?
+            """,
+            args,
         ) as cur:
             row = await cur.fetchone()
 
-        if not row:
-            return True
+        keys = ("rpm", "tpm", "rph", "tph", "rpd", "tpd")
+        return {k: (row[i] or 0) if row else 0 for i, k in enumerate(keys)}
 
-        rpm_count, tpm_used, rpd_count, tpd_used = (
-            row[0] or 0, row[1] or 0, row[2] or 0, row[3] or 0
-        )
+    async def can_use(
+        self, provider: str, model_id: str, estimated_tokens: int
+    ) -> bool:
+        """Would this request stay inside every known limit?
 
-        if limits.get("rpm") and rpm_count >= limits["rpm"]:
-            return False
-        if limits.get("tpm") and tpm_used + total_estimated > limits["tpm"]:
-            return False
-        if limits.get("rpd") and rpd_count >= limits["rpd"]:
-            return False
-        if limits.get("tpd") and tpd_used + total_estimated > limits["tpd"]:
-            return False
+        Two scopes, and the difference is the whole point. A limit stored against
+        `model_id = ''` is an ACCOUNT limit — OpenRouter's 50 requests/day covers
+        every model on the key — so it has to be counted across every model.
+        Counting it per model, which is what this did, turned a 50/day budget
+        into 50-per-model: with 20 active models, a 20x overrun before anything
+        said no.
+        """
+        minute, hour, day = await self._window_starts(provider)
+        total_estimated = estimated_tokens + 1024  # expected completion
+
+        # Account-wide first: it is the tighter and more consequential of the two.
+        scopes: list[tuple[str, str | None]] = [("", None)]
+        if model_id:
+            scopes.append((model_id, model_id))
+
+        for limits_key, usage_scope in scopes:
+            limits = await self._get_limits(provider, limits_key)
+            if not limits:
+                continue
+            used = await self._usage(provider, usage_scope, minute, hour, day)
+            for key in ("rpm", "rph", "rpd"):
+                if limits.get(key) and used[key] >= limits[key]:
+                    logger.info(
+                        "Quota blocked %s%s: %s %d/%d",
+                        provider, f":{model_id}" if usage_scope else " (account)",
+                        key, used[key], limits[key],
+                    )
+                    return False
+            for key in ("tpm", "tph", "tpd"):
+                if limits.get(key) and used[key] + total_estimated > limits[key]:
+                    logger.info(
+                        "Quota blocked %s%s: %s %d+%d/%d",
+                        provider, f":{model_id}" if usage_scope else " (account)",
+                        key, used[key], total_estimated, limits[key],
+                    )
+                    return False
 
         return True
 
@@ -139,60 +176,45 @@ class QuotaManager:
             self._cache_expires.pop(cache_key, None)
 
     async def get_all_quota_status(self) -> list[dict]:
-        db = await get_db()
-        now = datetime.now(timezone.utc)
+        """Per-provider account-wide usage against account-wide limits.
 
+        `quota_remaining_pct` feeds the `headroom` term in the router's score.
+        Until the account-wide rows existed it was always 1.0 for every provider,
+        which made that whole term a constant — the formula looked like it
+        weighed quota and did not. `limits_known` says which providers still
+        have no published cap, so a full-looking bar can be read as "unknown"
+        rather than "plenty".
+        """
+        db = await get_db()
         async with db.execute(
-            "SELECT id, daily_reset_utc_hour FROM providers WHERE enabled = 1"
+            "SELECT id FROM providers WHERE enabled = 1"
         ) as cursor:
-            providers = await cursor.fetchall()
+            providers = [row[0] for row in await cursor.fetchall()]
 
         results = []
-        for provider_id, reset_hour in providers:
-            minute_ago = (now - timedelta(minutes=1)).isoformat()
-            daily_start = now.replace(hour=reset_hour, minute=0, second=0, microsecond=0)
-            if now.hour < reset_hour:
-                daily_start -= timedelta(days=1)
-            daily_iso = daily_start.isoformat()
-
+        for provider_id in providers:
+            minute, hour, day = await self._window_starts(provider_id)
             limits = await self._get_limits(provider_id, "")
+            used = await self._usage(provider_id, None, minute, hour, day)
 
-            usage_q = """
-                SELECT COUNT(*), COALESCE(SUM(tokens_in + tokens_out), 0)
-                FROM quota_usage
-                WHERE provider_id = ? AND timestamp >= ? AND success = 1
-            """
-
-            async with db.execute(usage_q, (provider_id, minute_ago)) as cur:
-                row = await cur.fetchone()
-                rpm_used, tpm_used = (row[0], row[1]) if row else (0, 0)
-
-            async with db.execute(usage_q, (provider_id, daily_iso)) as cur:
-                row = await cur.fetchone()
-                rpd_used, tpd_used = (row[0], row[1]) if row else (0, 0)
-
-            pcts = []
-            if limits.get("rpm"):
-                pcts.append(max(0, (limits["rpm"] - rpm_used) / limits["rpm"]))
-            if limits.get("tpm"):
-                pcts.append(max(0, (limits["tpm"] - tpm_used) / limits["tpm"]))
-            if limits.get("rpd"):
-                pcts.append(max(0, (limits["rpd"] - rpd_used) / limits["rpd"]))
-            if limits.get("tpd"):
-                pcts.append(max(0, (limits["tpd"] - tpd_used) / limits["tpd"]))
+            pcts = [
+                max(0.0, (limits[key] - used[key]) / limits[key])
+                for key in ("rpm", "rph", "rpd", "tpm", "tph", "tpd")
+                if limits.get(key)
+            ]
+            remaining = min(pcts) if pcts else 1.0
 
             results.append({
                 "provider_id": provider_id,
-                "rpm_used": rpm_used,
-                "rpm_limit": limits.get("rpm"),
-                "tpm_used": tpm_used,
-                "tpm_limit": limits.get("tpm"),
-                "rpd_used": rpd_used,
-                "rpd_limit": limits.get("rpd"),
-                "tpd_used": tpd_used,
-                "tpd_limit": limits.get("tpd"),
-                "quota_remaining_pct": min(pcts) if pcts else 1.0,
-                "healthy": (min(pcts) if pcts else 1.0) > 0,
+                "rpm_used": used["rpm"], "rpm_limit": limits.get("rpm"),
+                "rph_used": used["rph"], "rph_limit": limits.get("rph"),
+                "rpd_used": used["rpd"], "rpd_limit": limits.get("rpd"),
+                "tpm_used": used["tpm"], "tpm_limit": limits.get("tpm"),
+                "tph_used": used["tph"], "tph_limit": limits.get("tph"),
+                "tpd_used": used["tpd"], "tpd_limit": limits.get("tpd"),
+                "limits_known": bool(pcts),
+                "quota_remaining_pct": remaining,
+                "healthy": remaining > 0,
             })
 
         return results

@@ -43,6 +43,17 @@ class AdapterResponse:
     status: int | None = None
 
 
+def describe_exception(exc: BaseException) -> str:
+    """Name the failure, always.
+
+    `str(httpx.ConnectTimeout())` is the empty string, so an error built from it
+    said nothing: the circuit breaker matches on message text, found no pattern
+    in "", and never opened on a provider that had gone completely dark.
+    """
+    detail = redact_error(exc)
+    return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
+
+
 def content_chunk(content: str, finish_reason: str | None = None) -> dict:
     """A minimal OpenAI streaming chunk, for providers that have no stream of
     their own and hand us the whole answer at once."""
@@ -118,9 +129,9 @@ class BaseAdapter(ABC):
                 if attempt < 2:
                     await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
                     continue
-                return {"error": redact_error(e)}
+                return {"error": describe_exception(e)}
             except Exception as e:
-                return {"error": redact_error(e)}
+                return {"error": describe_exception(e)}
 
     def _error_response(self, result: dict, start_time: float) -> "AdapterResponse":
         """Wrap a failed request, keeping the upstream status off the wire body."""
@@ -264,7 +275,7 @@ class OpenAICompatibleAdapter(BaseAdapter):
             yield {"error": f"HTTP {e.response.status_code}: {redact(body)}",
                    "status": e.response.status_code}
         except Exception as e:
-            yield {"error": redact_error(e)}
+            yield {"error": describe_exception(e)}
 
     async def generate_image(self, prompt: str, model_id: str, **kwargs) -> AdapterResponse:
         """Generate an image via OpenAI-compatible /v1/images/generations endpoint."""
