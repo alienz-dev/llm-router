@@ -28,6 +28,14 @@ Current state only. Rewritten in place, never appended. History lives in `CHANGE
   that model's capability flags instead.
 - **Per-model capability flags** are seeded from the verified inventory, dated by the
   file, and re-probed weekly with a per-provider budget. NULL means unknown.
+- **The free-tier budget is measured, not assumed.** Account-wide caps are counted across
+  every model on the key, `quota_remaining_pct` is a real number feeding the routing score,
+  and `limits_known` marks the providers that publish no cap. The probe spends against the
+  same ledger: 24h staleness window, 8 models per provider per cycle, and it stands down
+  under 25% headroom. A startup that used to cost 39 provider requests now costs 0.
+- **`auto` falls back across providers, not across one provider's models** — a rate-limited
+  OpenRouter no longer ends the request.
+- **Logging is configured**, so the router says what it is doing.
 - **Secrets are redacted at the point of capture** — logs, `model_health`, circuit
   breaker state and the body a caller receives. `API_KEY` auth uses
   `hmac.compare_digest` and no longer accepts a key in the query string.
@@ -75,6 +83,9 @@ Current state only. Rewritten in place, never appended. History lives in `CHANGE
 - **Reasoning models leak their scratchpad into `content`** — `nemotron-3.5-lightning`
   returns its full "Here's a thinking process:" preamble as message content. Unowned
   by any ticket; either consumers tolerate it or the router splits `reasoning` out.
+- **Nothing writes a per-request log.** `quota_usage` has no status, latency or request id
+  and is deleted after 48h, so "why was that answer slow / wrong" is unanswerable after the
+  fact. The next observability step.
 - **Six providers have no key set** (cerebras, groq, mistral, kilo, cloudflare,
   huggingface) and are dead weight in scoring. Groq is the strongest free
   tool-calling tier available — 30 RPM / 14,400 RPD — and a signup is worth more
@@ -85,8 +96,11 @@ Current state only. Rewritten in place, never appended. History lives in `CHANGE
 1. Deploy (the four commands above), then rotate `GOOGLE_AI_API_KEY`.
 2. Set `HEALTHCHECKS_URL` so a dead router pages instead of going unnoticed.
 3. Sign up for Groq; it changes what `auto` can do for agent traffic more than
-   anything left in the code.
-4. Then the job-hunter cutover — its `LlmProvider` seam (DESIGN.md D11) is what this
+   anything left in the code. Its free tier is also the only one whose published limits
+   would give the new ledger real headroom to route against.
+4. A `request_log` table where `record_usage` already writes — the first data that is not
+   derivable from anything else, and the thing that makes a bad run diagnosable.
+5. Then the job-hunter cutover — its `LlmProvider` seam (DESIGN.md D11) is what this
    sprint made implementable. That is job-hunter's ticket to schedule, and its
    DeepSeek-direct default must not switch until the router has run green for a week.
 

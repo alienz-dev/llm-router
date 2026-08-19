@@ -2,6 +2,25 @@
 
 Append-only. One dated line per shipped change. Current state lives in `STATUS.md`.
 
+## 2026-08-19 (later)
+
+- The free-tier ledger is real. Account-wide caps (OpenRouter's 50/day) are seeded as the
+  `model_id = ''` row the schema reserved, counted across every model on the key, and
+  reported with a `limits_known` flag. `can_use` had been returning True for every request
+  ever made, and `quota_remaining_pct` was a constant 1.0 — which made the `headroom` term
+  in the routing score inert.
+- The probe stopped eating the budget it measures: 24h staleness window, 8 models per
+  provider per cycle, skips a provider under 25% headroom, and records what it spends.
+  Startup went from 39 provider requests to 0. Router freshness bands widened to match.
+- `auto` spreads its fallback across three distinct providers instead of the top five
+  models, so one rate-limited provider no longer ends the request.
+- Fixed: `/v1/models/health` success rate (divided by `avg_latency_ms`); rate-limited sweeps
+  marking uncalled models unhealthy; the weekly capability probe crashing on a keyless
+  provider; a mid-stream client disconnect going unbooked; silent transport timeouts never
+  opening the breaker; unknown models returning 502 instead of 404.
+- Logging is configured. Nothing in the package had ever called `basicConfig`, so every
+  `logger.info` was discarded.
+
 ## 2026-08-19
 
 - Credentials are redacted where the error string is built, not where it is printed —
