@@ -106,6 +106,13 @@ Current state only. Rewritten in place, never appended. History lives in `CHANGE
 
 ## Reference
 
+- **opencode.ai zen free tier is metered per model, not per account.** Measured
+  19 Aug: `nemotron-3-ultra-free`, `nemotron-3.5-lightning-free`, `hy3-free` and
+  `laguna-s-2.1-free` answered, while `deepseek-v4-flash-free`, `mimo-v2.5-free` and
+  `big-pickle` returned `FreeUsageLimitError` for at least ten minutes. The limit applies
+  with or without an API key, so it is not per-credential either. Treat any single zen
+  model as intermittently unavailable rather than free-and-unlimited.
+
 - Deployment runbook: `deploy/README.md`.
 - Verified model capabilities: `docs/model-capabilities-2026-08-18.json`
   (33 models probed; 18 return native `tool_calls`, 9 also honour strict
