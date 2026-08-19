@@ -33,6 +33,9 @@ async def db(monkeypatch):
     monkeypatch.setattr("llm_router.discovery.get_db", _get_db)
     monkeypatch.setattr("llm_router.probe.get_db", _get_db)
     monkeypatch.setattr("llm_router.health.get_db", _get_db)
+    # The probe consults the quota ledger before spending a request, so the fake
+    # database has to cover that module too.
+    monkeypatch.setattr("llm_router.quota.get_db", _get_db)
     yield conn
     await conn.close()
 
@@ -181,3 +184,109 @@ class TestProbeVerdictsAreRecorded:
             active, reason, at = await cur.fetchone()
         assert (active, reason, at) == (1, None, None)
         assert stats["reactivated"] == [f"nvidia:{DEAD}"]
+
+
+class TestZenFreeDiscovery:
+    """opencode.ai zen serves 60+ models from one endpoint and marks none of them
+    free — /v1/models returns id, object, created, owned_by and nothing else. The
+    free set was therefore hardcoded to two ids, one of which this repo's own
+    adapter blocks, so the router knew one of zen's seven free models and
+    recorded its context as 200k when it is 1M.
+    """
+
+    ZEN_SERVED = {"data": [{"id": i} for i in [
+        "claude-fable-5", "gpt-5.5-pro", "nemotron-3-ultra-free",
+        "deepseek-v4-flash-free", "big-pickle", "some-paid-model",
+    ]]}
+    MODELS_DEV = {"opencode": {"models": {
+        "nemotron-3-ultra-free": {"cost": {"input": 0, "output": 0},
+                                  "limit": {"context": 1_000_000}, "tool_call": True},
+        "deepseek-v4-flash-free": {"cost": {"input": 0, "output": 0},
+                                   "limit": {"context": 200_000}, "tool_call": True},
+        "big-pickle": {"cost": {"input": 0, "output": 0},
+                       "limit": {"context": 200_000}, "tool_call": True},
+        "gpt-5.5-pro": {"cost": {"input": 30, "output": 180},
+                        "limit": {"context": 400_000}, "tool_call": True},
+    }}}
+
+    def _client(self, monkeypatch, models_dev_ok=True):
+        import httpx
+
+        from llm_router import discovery as discovery_module
+
+        class FakeResponse:
+            def __init__(self, payload):
+                self._payload = payload
+
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return self._payload
+
+        class FakeClient:
+            def __init__(self, *a, **kw):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *a):
+                return False
+
+            async def get(self, url, **kw):
+                if "models.dev" in url:
+                    if not models_dev_ok:
+                        raise httpx.ConnectError("models.dev unreachable")
+                    return FakeResponse(TestZenFreeDiscovery.MODELS_DEV)
+                return FakeResponse(TestZenFreeDiscovery.ZEN_SERVED)
+
+        monkeypatch.setattr(discovery_module.httpx, "AsyncClient", FakeClient)
+
+    @pytest.mark.asyncio
+    async def test_it_finds_every_free_model_zen_actually_serves(self, monkeypatch):
+        from llm_router.discovery import ModelDiscovery
+
+        monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+        self._client(monkeypatch)
+
+        models = await ModelDiscovery()._discover_opencode()
+
+        assert {m["model_id"] for m in models} == {
+            "nemotron-3-ultra-free", "deepseek-v4-flash-free", "big-pickle"}
+
+    @pytest.mark.asyncio
+    async def test_it_records_the_real_context_window(self, monkeypatch):
+        """1M, not the 200k that was hardcoded for every zen model."""
+        from llm_router.discovery import ModelDiscovery
+
+        monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+        self._client(monkeypatch)
+
+        models = {m["model_id"]: m for m in await ModelDiscovery()._discover_opencode()}
+        assert models["nemotron-3-ultra-free"]["context_length"] == 1_000_000
+
+    @pytest.mark.asyncio
+    async def test_paid_models_never_enter_the_catalogue(self, monkeypatch):
+        """This router is for free tiers; gpt-5.5-pro is $30/$180 per 1M."""
+        from llm_router.discovery import ModelDiscovery
+
+        monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+        self._client(monkeypatch)
+
+        models = await ModelDiscovery()._discover_opencode()
+        assert "gpt-5.5-pro" not in {m["model_id"] for m in models}
+
+    @pytest.mark.asyncio
+    async def test_it_degrades_to_name_matching_when_the_catalogue_is_down(
+        self, monkeypatch
+    ):
+        """models.dev being unreachable must not empty the provider."""
+        from llm_router.discovery import ModelDiscovery
+
+        monkeypatch.setenv("OPENCODE_API_KEY", "test-key")
+        self._client(monkeypatch, models_dev_ok=False)
+
+        found = {m["model_id"] for m in await ModelDiscovery()._discover_opencode()}
+        assert found == {"nemotron-3-ultra-free", "deepseek-v4-flash-free", "big-pickle"}
+        assert "gpt-5.5-pro" not in found

@@ -281,6 +281,40 @@ class ModelDiscovery:
             "KILO_API_KEY", "https://api.kilo.ai/v1/models",
         )
 
+    # opencode.ai zen serves 60+ models from one endpoint and marks none of them
+    # free — /v1/models returns id, object, created, owned_by and nothing else.
+    # models.dev is the catalogue opencode's own CLI reads, and it carries cost
+    # and context. Intersecting the two gives what is both *served today* and
+    # *free today*, which a hardcoded pair could never track: the previous list
+    # named two models, one of which this repo's own adapter blocks, so the
+    # router knew one of zen's seven free models.
+    MODELS_DEV_URL = "https://models.dev/api.json"
+
+    # Used only when models.dev is unreachable. Zen's free ids end in "-free",
+    # with one long-standing exception.
+    _ZEN_FREE_FALLBACK = {"big-pickle"}
+
+    async def _zen_free_catalogue(self, client: httpx.AsyncClient) -> dict[str, dict]:
+        """{model_id: {"context": int, "tools": bool}} for zen's cost-zero models."""
+        try:
+            resp = await client.get(self.MODELS_DEV_URL, timeout=20)
+            resp.raise_for_status()
+            catalogue = resp.json().get("opencode", {}).get("models", {})
+        except Exception as e:
+            logger.warning("models.dev unavailable, falling back to name matching: %s",
+                           redact(e))
+            return {}
+
+        free = {}
+        for model_id, meta in catalogue.items():
+            cost = meta.get("cost") or {}
+            if cost.get("input") == 0 and cost.get("output") == 0:
+                free[model_id] = {
+                    "context": (meta.get("limit") or {}).get("context"),
+                    "tools": meta.get("tool_call"),
+                }
+        return free
+
     async def _discover_opencode(self) -> list[dict]:
         api_key = os.getenv("OPENCODE_API_KEY")
         if not api_key:
@@ -291,17 +325,24 @@ class ModelDiscovery:
                 headers={"Authorization": f"Bearer {api_key}"},
             )
             resp.raise_for_status()
-        # Only include models that are actually free and reliable (verified by test)
-        free_models = {"nemotron-3-ultra-free", "nemotron-3-super-free"}
+            served = [m["id"] for m in resp.json().get("data", [])]
+            free = await self._zen_free_catalogue(client)
+
         models = []
-        for m in resp.json().get("data", []):
-            if m["id"] not in free_models:
-                continue
+        for model_id in served:
+            if free:
+                if model_id not in free:
+                    continue
+                context = free[model_id].get("context") or 200000
+            else:
+                if not (model_id.endswith("-free") or model_id in self._ZEN_FREE_FALLBACK):
+                    continue
+                context = 200000
             models.append({
-                "model_id": m["id"],
-                "display_name": m.get("id"),
-                "context_length": 200000,
-                "task_scores": _get_task_scores(m["id"]),
+                "model_id": model_id,
+                "display_name": model_id,
+                "context_length": context,
+                "task_scores": _get_task_scores(model_id),
             })
         return models
 
