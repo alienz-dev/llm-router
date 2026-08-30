@@ -2,14 +2,29 @@
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
 from .db import get_db
+from .redact import redact, redact_error
 from .health import ModelHealthRepository
+from .quota import QuotaManager
 
 logger = logging.getLogger(__name__)
+
+# A model the probe switched off is re-checked this many days later. Without a
+# re-check a transient 404 is permanent: probe_all_models only looks at active
+# rows, and discovery no longer flips them back on.
+DEACTIVATED_RECHECK_DAYS = 7
+
+# The probe used to sweep every active model on every 2-hourly cycle: 20 active
+# OpenRouter models x 12 cycles = 240 requests a day against a 50/day cap, none
+# of it recorded. Three controls now bound it, and real traffic counts as
+# freshness because the router writes last_probe_at on every request.
+PROBE_MIN_AGE_HOURS = 24      # do not re-probe a model whose health is newer
+PROBE_BUDGET_PER_PROVIDER = 8  # burst cap per cycle
+PROBE_QUOTA_FLOOR = 0.25       # leave this share of the budget for real work
 
 # Known free-tier quota limits (from research)
 KNOWN_LIMITS = {
@@ -51,7 +66,15 @@ KNOWN_LIMITS = {
     },
     # Kilo Gateway - probe will discover
     "kilo": {},
+    # Agnes AI - probe will discover
+    "agnes": {},
 }
+
+# The marker every rate-limit check tests for. It used to be spelled two ways
+# — "rate_limited" in the check, "rate limited" in one of the producers — so the
+# check silently never matched.
+RATE_LIMITED = "rate_limited"
+
 
 # Standard OpenAI-compatible probe config factory
 def _openai_probe(url: str, key_env: str) -> dict:
@@ -102,6 +125,8 @@ PROBE_ENDPOINTS = {
         "key_env": "HF_API_TOKEN",
         "url_builder": lambda model, key: f"https://api-inference.huggingface.co/models/{model}",
     },
+    "agnes": _openai_probe(
+        "https://apihub.agnes-ai.com/v1/chat/completions", "AGNES_API_KEY"),
 }
 
 
@@ -135,57 +160,124 @@ async def probe_model(client: httpx.AsyncClient, provider_id: str, model_id: str
         latency = (time.monotonic() - t0) * 1000
 
         if resp.status_code == 200:
-            return {"available": True, "error": None, "latency_ms": latency}
+            return {"available": True, "error": None, "latency_ms": latency,
+                    "reached": True}
         elif resp.status_code == 429:
             # Rate limited but model exists
             retry_after = resp.headers.get("retry-after", "")
-            return {"available": False, "error": f"rate_limited (retry-after={retry_after})", "latency_ms": latency}
+            return {"available": False, "latency_ms": latency, "reached": True,
+                    "error": f"{RATE_LIMITED} (retry-after={retry_after})"}
         elif resp.status_code == 401:
             try:
                 err = resp.json().get("error", {})
-                msg = err.get("message", resp.text[:100])
+                msg = err.get("message", resp.text)
             except Exception:
-                msg = resp.text[:100]
-            return {"available": False, "error": f"auth/credits: {msg}", "latency_ms": latency}
+                msg = resp.text
+            # This string is written to model_health.last_probe_error, which
+            # /v1/models/health and /dashboard serve. Redact before truncating —
+            # truncating a key only makes it shorter.
+            return {"available": False, "error": f"auth/credits: {redact(msg)[:100]}",
+                    "latency_ms": latency, "reached": True}
         elif resp.status_code == 404:
-            return {"available": False, "error": "model not found", "latency_ms": latency}
+            return {"available": False, "error": "model not found", "latency_ms": latency,
+                    "reached": True}
         else:
-            return {"available": False, "error": f"HTTP {resp.status_code}", "latency_ms": latency}
+            return {"available": False, "error": f"HTTP {resp.status_code}", "latency_ms": latency,
+                    "reached": True}
 
     except httpx.TimeoutException:
         return {"available": False, "error": "timeout"}
     except Exception as e:
-        return {"available": False, "error": str(e)[:80]}
+        return {"available": False, "error": redact_error(e, 80)}
 
 
-async def probe_all_models() -> dict[str, dict[str, dict]]:
-    """Probe all active models in the DB. Returns {provider_id: {model_id: probe_result}}."""
+async def probe_all_models(
+    min_age_hours: float = PROBE_MIN_AGE_HOURS,
+    budget_per_provider: int = PROBE_BUDGET_PER_PROVIDER,
+) -> dict[str, dict[str, dict]]:
+    """Probe the models whose health data has gone stale.
+
+    Returns {provider_id: {model_id: probe_result}}, covering only what was
+    actually probed this cycle — a model that was skipped as fresh must not
+    appear, or the caller would record a verdict nobody formed.
+
+    Never-probed models go first: an unknown model is what makes the router
+    guess. Real traffic refreshes `last_probe_at` through the same repository,
+    so a model in active use is never probed synthetically.
+    """
+    import json as _json
     db = await get_db()
+    recheck_before = (
+        datetime.now(timezone.utc) - timedelta(days=DEACTIVATED_RECHECK_DAYS)
+    ).isoformat()
+    stale_before = (
+        datetime.now(timezone.utc) - timedelta(hours=min_age_hours)
+    ).isoformat()
     async with db.execute(
-        "SELECT provider_id, model_id FROM models WHERE active = 1"
+        """SELECT m.provider_id, m.model_id, m.task_scores
+           FROM models m
+           LEFT JOIN model_health mh ON m.provider_id = mh.provider_id
+                                    AND m.model_id = mh.model_id
+           WHERE (m.active = 1
+                  OR (m.deactivated_at IS NOT NULL AND m.deactivated_at < ?))
+             AND (mh.last_probe_at IS NULL OR mh.last_probe_at < ?)
+           ORDER BY mh.last_probe_at IS NOT NULL, mh.last_probe_at, m.model_id""",
+        (recheck_before, stale_before),
     ) as cur:
         models = await cur.fetchall()
+
+    if not models:
+        logger.info("Probe: every model's health is under %sh old — no calls made",
+                    min_age_hours)
+        return {}
 
     results = {}
     async with httpx.AsyncClient(timeout=30) as client:
         # Probe sequentially per provider (respect rate limits), parallel across providers
         provider_groups: dict[str, list[str]] = {}
-        for pid, mid in models:
+        for pid, mid, scores_raw in models:
+            # Skip image-only models — they don't support chat completions
+            try:
+                scores = _json.loads(scores_raw) if scores_raw else {}
+            except (ValueError, TypeError):
+                scores = {}
+            if "image_generation" in scores and not any(
+                k in scores for k in ("code", "reasoning", "summarize", "general")
+            ):
+                continue
             provider_groups.setdefault(pid, []).append(mid)
+
+        # A provider running low on its daily budget must not have the rest of it
+        # spent on liveness checks.
+        quota = QuotaManager()
+        headroom = {s["provider_id"]: s["quota_remaining_pct"]
+                    for s in await quota.get_all_quota_status()}
 
         async def probe_provider(pid: str, mids: list[str]):
             r = {}
-            rate_limited = False
-            for mid in mids:
-                if rate_limited:
-                    r[mid] = {"available": False, "error": "provider rate limited (skipped)"}
+            if headroom.get(pid, 1.0) < PROBE_QUOTA_FLOOR:
+                logger.info("Skipping probes for %s — only %.0f%% of its budget left",
+                            pid, headroom.get(pid, 1.0) * 100)
+                return pid, r
+            for mid in mids[:budget_per_provider]:
+                if not await quota.can_use(pid, mid, 16):
+                    logger.info("Skipping probe of %s:%s — no quota", pid, mid)
                     continue
                 r[mid] = await probe_model(client, pid, mid)
-                # If provider is rate limited, skip remaining models for this provider
-                if not r[mid]["available"] and "rate_limited" in r[mid].get("error", ""):
-                    rate_limited = True
-                    continue
-                # Small delay between probes
+                if r[mid].get("reached"):
+                    # The provider served this request and counted it, whatever
+                    # it answered. Booking it is the difference between a budget
+                    # the router manages and one it merely observes.
+                    await quota.record_usage(pid, mid, 16, 3, True)
+                # A rate-limited provider tells us nothing about its remaining
+                # models, so stop — and report nothing for them. Recording them
+                # as unavailable was recording an opinion we never formed: five
+                # HuggingFace models reached 4 consecutive "failures" that way,
+                # one short of being hard-skipped by the router.
+                if not r[mid]["available"] and RATE_LIMITED in (r[mid].get("error") or ""):
+                    logger.info("%s rate limited — skipping its remaining %d models",
+                                pid, min(len(mids), budget_per_provider) - len(r))
+                    break
                 await asyncio.sleep(0.5)
             return pid, r
 
@@ -193,7 +285,7 @@ async def probe_all_models() -> dict[str, dict[str, dict]]:
         gathered = await asyncio.gather(*tasks, return_exceptions=True)
         for result in gathered:
             if isinstance(result, Exception):
-                logger.error("Probe failed: %s", result)
+                logger.error("Probe failed: %s", redact(result))
                 continue
             pid, probe_results = result
             results[pid] = probe_results
@@ -201,22 +293,40 @@ async def probe_all_models() -> dict[str, dict[str, dict]]:
     return results
 
 
+# KNOWN_LIMITS uses this key for a cap that applies to the whole account rather
+# than to one model. The quota tables spell the same idea as an empty model_id.
+PROVIDER_WIDE = "_default"
+
+
 async def seed_known_limits():
-    """Seed known quota limits into the DB from research data."""
+    """Seed known quota limits into the DB from research data.
+
+    `_default` entries used to be skipped outright, so OpenRouter's 50/day cap —
+    the single tightest constraint this router exists to manage — was never
+    written, `can_use` found no limits, and it returned True for every request
+    ever made. They are stored as the `model_id = ''` row the schema already
+    reserves for account-wide limits.
+    """
     db = await get_db()
     for provider_id, models in KNOWN_LIMITS.items():
         for model_id, limits in models.items():
-            if model_id.startswith("_"):
+            if model_id.startswith("_") and model_id != PROVIDER_WIDE:
                 continue
+            if model_id == PROVIDER_WIDE:
+                model_id = ""
             await db.execute(
-                """INSERT INTO quota_limits (provider_id, model_id, rpm, rpd, tpm)
-                   VALUES (?, ?, ?, ?, ?)
+                """INSERT INTO quota_limits (provider_id, model_id, rpm, rph, rpd, tpm, tph, tpd)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                    ON CONFLICT(provider_id, model_id) DO UPDATE SET
                    rpm = COALESCE(excluded.rpm, rpm),
+                   rph = COALESCE(excluded.rph, rph),
                    rpd = COALESCE(excluded.rpd, rpd),
-                   tpm = COALESCE(excluded.tpm, tpm)""",
+                   tpm = COALESCE(excluded.tpm, tpm),
+                   tph = COALESCE(excluded.tph, tph),
+                   tpd = COALESCE(excluded.tpd, tpd)""",
                 (provider_id, model_id,
-                 limits.get("rpm"), limits.get("rpd"), limits.get("tpm")),
+                 limits.get("rpm"), limits.get("rph"), limits.get("rpd"),
+                 limits.get("tpm"), limits.get("tph"), limits.get("tpd")),
             )
             # Also update provider reset hour if known
             if "reset_hour" in limits:
@@ -236,7 +346,8 @@ async def run_probe_and_update() -> dict:
     db = await get_db()
     now = datetime.now(timezone.utc).isoformat()
     health_repo = ModelHealthRepository()
-    stats = {"probed": 0, "available": 0, "unavailable": 0, "deactivated": []}
+    stats = {"probed": 0, "available": 0, "unavailable": 0,
+             "deactivated": [], "reactivated": []}
 
     for provider_id, model_results in results.items():
         for model_id, probe in model_results.items():
@@ -252,8 +363,18 @@ async def run_probe_and_update() -> dict:
 
             if available:
                 stats["available"] += 1
+                async with db.execute(
+                    "SELECT active FROM models WHERE provider_id = ? AND model_id = ?",
+                    (provider_id, model_id),
+                ) as cur:
+                    row = await cur.fetchone()
+                if row and not row[0]:
+                    stats["reactivated"].append(f"{provider_id}:{model_id}")
+                    logger.info("Reactivated %s:%s — probe succeeded", provider_id, model_id)
                 await db.execute(
-                    "UPDATE models SET active = 1 WHERE provider_id = ? AND model_id = ?",
+                    """UPDATE models SET active = 1, deactivated_reason = NULL,
+                           deactivated_at = NULL
+                       WHERE provider_id = ? AND model_id = ?""",
                     (provider_id, model_id),
                 )
             else:
@@ -261,12 +382,14 @@ async def run_probe_and_update() -> dict:
                 error = error or "unknown"
                 if "auth/credits" in error or "not found" in error:
                     await db.execute(
-                        "UPDATE models SET active = 0 WHERE provider_id = ? AND model_id = ?",
-                        (provider_id, model_id),
+                        """UPDATE models SET active = 0, deactivated_reason = ?,
+                               deactivated_at = ?
+                           WHERE provider_id = ? AND model_id = ?""",
+                        (error, now, provider_id, model_id),
                     )
                     stats["deactivated"].append(f"{provider_id}:{model_id} ({error})")
                     logger.warning("Deactivated %s:%s - %s", provider_id, model_id, error)
-                elif "rate_limited" in error:
+                elif RATE_LIMITED in error:
                     logger.info("Rate limited: %s:%s - %s", provider_id, model_id, error)
                 else:
                     logger.warning("Probe failed: %s:%s - %s", provider_id, model_id, error)

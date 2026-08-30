@@ -39,6 +39,12 @@ TRIP_PATTERNS = frozenset({
     "connection reset", "connection refused",
     "server error", "service unavailable",
     "bad gateway", "gateway timeout",
+    # httpx transport exception names. These arrive as "ConnectError: ..." and
+    # are the clearest possible evidence a provider is down — but several carry
+    # no message at all, so matching on prose alone missed them entirely.
+    "connecterror", "connecttimeout", "readtimeout", "writetimeout",
+    "pooltimeout", "readerror", "writeerror", "remoteprotocolerror",
+    "proxyerror", "networkerror",
 })
 
 

@@ -1,4 +1,5 @@
 """FastAPI application with all routes."""
+import hmac
 import json
 import logging
 import os
@@ -7,13 +8,22 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from .adapters import ADAPTERS
+from .capabilities import seed_from_inventory
+from .logging_setup import configure_logging
 from .db import get_db, close_db
-from .models import ChatCompletionRequest, JobSubmission
+from .adapters.base import AdapterResponse
+from .models import (
+    ChatCompletionRequest,
+    ImageGenerationRequest,
+    JobSubmission,
+    error_response,
+)
 from .quota import QuotaManager
+from .redact import redact_error
 from .queue import JobQueue
 from .router import SmartRouter
 from .scheduler import AppScheduler
@@ -34,11 +44,12 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         if request.url.path == "/health":
             return await call_next(request)
         auth = request.headers.get("authorization", "")
-        if auth == f"Bearer {self.api_key}":
+        # compare_digest, not ==: a plain comparison leaks the key one byte at a
+        # time to anyone who can time the response.
+        if hmac.compare_digest(auth, f"Bearer {self.api_key}"):
             return await call_next(request)
-        # Also allow query param for SSE clients that can't set headers
-        if request.query_params.get("key") == self.api_key:
-            return await call_next(request)
+        # No ?key= fallback: query strings land in access logs, proxy logs and
+        # Referer headers, which is exactly how this key would leak next.
         return Response(content='{"error":{"message":"Invalid API key","type":"auth_error"}}', status_code=401, media_type="application/json")
 
 # --- Globals wired in lifespan ---
@@ -90,8 +101,12 @@ async def _seed_providers():
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _router, _quota, _queue, _scheduler
+    configure_logging()
     await get_db()
     await _seed_providers()
+    # Idempotent: only fills rows that have never been checked, so a live probe
+    # result always outranks the file.
+    await seed_from_inventory()
 
     adapters = _build_adapters()
     _quota = QuotaManager()
@@ -122,28 +137,89 @@ else:
     logger.info("API key auth disabled (set API_KEY env var to enable)")
 
 
+# Upstream statuses that describe the *request* rather than the provider's health.
+# These reach the caller unchanged so it can act immediately instead of retrying
+# something that will never succeed. Everything else — 5xx, auth failures against
+# our own provider keys, connection errors — becomes a 502: the caller's request
+# was fine, our upstream was not.
+_PASSTHROUGH_STATUSES = frozenset({400, 404, 413, 422, 429})
+
+
+def _upstream_error(result, fallback_type: str = "upstream_error") -> JSONResponse:
+    """Render an adapter/router failure as an OpenAI-shaped error response.
+
+    The error object sits at the top level, where OpenAI SDK clients look for it —
+    FastAPI's HTTPException would nest it under "detail".
+    """
+    status = result.status if result.status in _PASSTHROUGH_STATUSES else 502
+    return JSONResponse(
+        status_code=status,
+        content=error_response(result.response["error"], fallback_type),
+    )
+
+
 # ── Health ──────────────────────────────────────────────
 @app.get("/health")
-async def health():
-    return {"status": "ok"}
+async def health(response: Response):
+    """Assert the two things a wedged process loses first.
+
+    The old handler returned {"status": "ok"} without touching anything, so a
+    process with a dead database connection and zero adapters still looked
+    healthy. That is worse than having no check at all, because the heartbeat
+    believes it and nobody is paged.
+
+    Deliberately cheap — no provider calls. This runs on a short interval and a
+    free-tier request budget is not something to spend on liveness.
+    """
+    checks: dict[str, Any] = {}
+    healthy = True
+
+    try:
+        db = await get_db()
+        async with db.execute("SELECT COUNT(*) FROM providers") as cur:
+            row = await cur.fetchone()
+        checks["database"] = {"ok": True, "providers": row[0]}
+    except Exception as e:
+        healthy = False
+        checks["database"] = {"ok": False, "error": redact_error(e, 200)}
+
+    adapters = getattr(_router, "adapters", None) or {}
+    checks["adapters"] = {"ok": bool(adapters), "count": len(adapters),
+                          "providers": sorted(adapters)}
+    if not adapters:
+        healthy = False
+
+    if not healthy:
+        response.status_code = 503
+    return {"status": "ok" if healthy else "unhealthy", "checks": checks}
 
 
 # ── OpenAI-compatible: chat completions ─────────────────
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatCompletionRequest, response: Response):
-    messages = [m.model_dump() for m in req.messages]
-
-    # Build kwargs from request params that should flow through to adapters
-    extra_kwargs = {}
-    if req.max_tokens is not None:
-        extra_kwargs["max_tokens"] = req.max_tokens
-    if req.temperature is not None:
-        extra_kwargs["temperature"] = req.temperature
+    # exclude_none, so an assistant message that only calls a tool arrives as
+    # {"role": "assistant", "tool_calls": [...]} rather than carrying an explicit
+    # content: null that some providers reject.
+    messages = [m.model_dump(exclude_none=True) for m in req.messages]
+    extra_kwargs = req.passthrough_params()
 
     if req.stream:
         stream_iter = await _router.route(
             messages, model_override=req.model, stream=True, **extra_kwargs,
         )
+        # The router can refuse before any stream exists — no capable model, no
+        # quota, circuit breaker open.
+        if not hasattr(stream_iter, "__aiter__"):
+            return _upstream_error(stream_iter)
+        # Look at the first chunk before committing to 200. Once the SSE body has
+        # started there is no status left to send, and a client's retry logic
+        # keys on the status.
+        first, stream_iter = await _peek_stream(stream_iter)
+        if isinstance(first, dict) and "error" in first:
+            return _upstream_error(AdapterResponse(
+                response={"error": first["error"]}, quota=None, tokens_in=0,
+                tokens_out=0, latency_ms=0, status=first.get("status"),
+            ))
         return StreamingResponse(
             _sse_wrap(stream_iter, req.model or "auto"),
             media_type="text/event-stream",
@@ -153,11 +229,7 @@ async def chat_completions(req: ChatCompletionRequest, response: Response):
         messages, model_override=req.model, stream=False, **extra_kwargs,
     )
     if "error" in result.response:
-        from .models import error_response
-        raise HTTPException(
-            status_code=502,
-            detail=error_response(result.response["error"], "upstream_error"),
-        )
+        return _upstream_error(result)
 
     meta = result.response.pop("_router", {})
     response.headers["x-llm-router-provider"] = meta.get("provider", "unknown")
@@ -169,20 +241,75 @@ async def chat_completions(req: ChatCompletionRequest, response: Response):
     return result.response
 
 
+# ── OpenAI-compatible: image generation ─────────────
+@app.post("/v1/images/generations")
+async def image_generations(req: ImageGenerationRequest, response: Response):
+    result = await _router.route_image(
+        prompt=req.prompt, model_override=req.model,
+        n=req.n, size=req.size, response_format=req.response_format,
+    )
+    if "error" in result.response:
+        return _upstream_error(result)
+    meta = result.response.pop("_router", {})
+    response.headers["x-llm-router-provider"] = meta.get("provider", "unknown")
+    response.headers["x-llm-router-model"] = meta.get("model", req.model or "auto")
+    return result.response
+
+
+async def _peek_stream(stream):
+    """Pull the first chunk, and hand back an iterator that still starts with it."""
+    iterator = stream.__aiter__()
+    try:
+        first = await iterator.__anext__()
+    except StopAsyncIteration:
+        first = None
+
+    async def _rewound():
+        if first is not None:
+            yield first
+        async for chunk in iterator:
+            yield chunk
+
+    return first, _rewound()
+
+
 async def _sse_wrap(stream, model_name: str):
+    """Re-emit the provider's chunks, adding only what the wire requires.
+
+    The chunk is passed through rather than rebuilt: `tool_calls` fragments carry
+    `index`, `id` and partial `arguments`, and rebuilding around `delta.content`
+    — which is what this did — silently dropped all of it, so a streamed tool
+    call arrived as an empty completion.
+    """
     chunk_id = f"chatcmpl-{int(time.time())}"
+    saw_error = False
+    saw_finish = False
     try:
         async for data in stream:
-            chunk = {
-                "id": chunk_id, "object": "chat.completion.chunk",
-                "created": int(time.time()), "model": model_name,
-                "choices": [{"index": 0, "delta": {"content": data}, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-        yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
+            if isinstance(data, str):
+                # Legacy adapters that yield plain content.
+                data = {"choices": [{"index": 0, "delta": {"content": data},
+                                     "finish_reason": None}]}
+            if "error" in data:
+                saw_error = True
+                yield f"data: {json.dumps(error_response(str(data['error']), 'upstream_error'))}\n\n"
+                break
+            data.setdefault("id", chunk_id)
+            data.setdefault("object", "chat.completion.chunk")
+            data.setdefault("created", int(time.time()))
+            data.setdefault("model", data.pop("_model", None) or model_name)
+            if any(c.get("finish_reason") for c in data.get("choices") or []):
+                saw_finish = True
+            yield f"data: {json.dumps(data)}\n\n"
+        # Only close the stream ourselves if the provider never did. Appending
+        # finish_reason: "stop" after the provider already said "tool_calls"
+        # tells a client the model stopped talking when it actually asked for a
+        # tool — which is the whole conversation an agent is having.
+        if not saw_error and not saw_finish:
+            yield f"data: {json.dumps({'id': chunk_id, 'object': 'chat.completion.chunk', 'created': int(time.time()), 'model': model_name, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': 'stop'}]})}\n\n"
         yield "data: [DONE]\n\n"
     except Exception as e:
-        yield f"data: {json.dumps({'error': str(e)})}\n\n"
+        yield f"data: {json.dumps(error_response(redact_error(e), 'upstream_error'))}\n\n"
         yield "data: [DONE]\n\n"
 
 
@@ -191,7 +318,7 @@ async def _sse_wrap(stream, model_name: str):
 async def list_models():
     db = await get_db()
     async with db.execute("""
-        SELECT m.model_id, m.display_name, m.context_length, p.name
+        SELECT m.model_id, m.display_name, m.context_length, p.name, m.provider_id
         FROM models m JOIN providers p ON m.provider_id = p.id
         WHERE m.active = 1 AND p.enabled = 1
     """) as cur:
@@ -199,7 +326,8 @@ async def list_models():
     return {
         "object": "list",
         "data": [
-            {"id": r[0], "object": "model", "created": int(time.time()), "owned_by": r[3]}
+            {"id": f"{r[4]}:{r[0]}", "object": "model", "created": int(time.time()),
+             "owned_by": r[3], "root": r[0], "context_length": r[2]}
             for r in rows
         ],
     }
@@ -249,7 +377,9 @@ async def model_health():
         rows = await cur.fetchall()
     models = []
     for r in rows:
-        total = (r[7] or 0) + (r[8] or 0)
+        # success_count + failure_count. This read r[7] (avg_latency_ms) for
+        # years, so every model reported a success rate near zero.
+        total = (r[8] or 0) + (r[9] or 0)
         models.append({
             "provider_id": r[0], "model_id": r[1], "display_name": r[10],
             "last_probe_at": r[2], "last_probe_ok": bool(r[3]),
@@ -306,10 +436,11 @@ async def dashboard():
 # ── Jobs ────────────────────────────────────────────────
 @app.post("/jobs")
 async def submit_job(req: JobSubmission):
-    messages = [m.model_dump() for m in req.messages]
+    messages = [m.model_dump(exclude_none=True) for m in req.messages]
     job_id = await _queue.submit_job(
         messages=messages, priority=req.priority,
         model_override=req.model, task_type=req.task_type,
+        params=req.passthrough_params(),
     )
     return {"job_id": job_id, "status": "pending"}
 

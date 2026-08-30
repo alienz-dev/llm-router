@@ -10,6 +10,7 @@ from .cloudflare import CloudflareAdapter
 from .huggingface import HuggingFaceAdapter
 from .opencode import OpenCodeAdapter
 from .deepseek import DeepSeekAdapter
+from .agnes import AgnesAdapter
 
 # Adapter registry for dynamic instantiation
 ADAPTERS = {
@@ -24,6 +25,7 @@ ADAPTERS = {
     "huggingface": HuggingFaceAdapter,
     "opencode": OpenCodeAdapter,
     "deepseek": DeepSeekAdapter,
+    "agnes": AgnesAdapter,
 }
 
 __all__ = [
@@ -39,5 +41,6 @@ __all__ = [
     "KiloAdapter",
     "CloudflareAdapter",
     "HuggingFaceAdapter",
+    "AgnesAdapter",
     "ADAPTERS",
 ]

@@ -1,37 +1,21 @@
-import asyncio
 import json
-import random
 import time
 from typing import AsyncIterator
 import httpx
-from .base import BaseAdapter, AdapterResponse, QuotaSnapshot
+from .base import BaseAdapter, AdapterResponse, QuotaSnapshot, content_chunk
 
 class CloudflareAdapter(BaseAdapter):
     provider_name = "cloudflare"
+
+    # Flattens to Workers AI's own payload: no tools, no response_format, and
+    # "streaming" is the whole answer in one chunk.
+    supports = {"tools": False, "json_schema": False, "streaming": True}
     
     def __init__(self, account_id: str, api_token: str):
         self.account_id = account_id
         self.api_token = api_token
         self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/ai/run"
         self.client = httpx.AsyncClient(timeout=30)
-    
-    async def _retry_with_backoff(self, func, *args, **kwargs):
-        for attempt in range(3):
-            try:
-                return await func(*args, **kwargs)
-            except httpx.HTTPStatusError as e:
-                if e.response.status_code in (429, 503) and attempt < 2:
-                    wait = (2 ** attempt) + random.uniform(0, 1)
-                    await asyncio.sleep(wait)
-                    continue
-                return {"error": f"HTTP {e.response.status_code}: {e.response.text}"}
-            except (httpx.ConnectError, httpx.TimeoutException) as e:
-                if attempt < 2:
-                    await asyncio.sleep((2 ** attempt) + random.uniform(0, 1))
-                    continue
-                return {"error": str(e)}
-            except Exception as e:
-                return {"error": str(e)}
     
     def _parse_quota(self, headers) -> QuotaSnapshot:
         # Cloudflare doesn't provide quota headers, return None for local tracking
@@ -81,7 +65,7 @@ class CloudflareAdapter(BaseAdapter):
         
         result = await self._retry_with_backoff(_make_request)
         if isinstance(result, dict) and "error" in result:
-            return AdapterResponse(result, None, 0, 0, (time.time() - start_time) * 1000)
+            return self._error_response(result, start_time)
         
         cf_data = result.json()
         openai_data = self._convert_from_cf_format(cf_data)
@@ -99,11 +83,10 @@ class CloudflareAdapter(BaseAdapter):
         # Cloudflare doesn't support streaming - fallback to non-streaming
         result = await self.chat_completion(messages, model_id, **kwargs)
         if "error" in result.response:
-            yield str(result.response.get("error", "Unknown error"))
+            yield {"error": result.response["error"], "status": result.status}
         else:
             content = result.response.get("choices", [{}])[0].get("message", {}).get("content", "")
-            if content:
-                yield content
+            yield content_chunk(content, finish_reason="stop")
     
     async def list_models(self) -> list[dict]:
         # Cloudflare models are predefined - return common ones
