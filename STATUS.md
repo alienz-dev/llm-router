@@ -41,7 +41,7 @@ Current state only. Rewritten in place, never appended. History lives in `CHANGE
   `hmac.compare_digest` and no longer accepts a key in the query string.
 - **Batch jobs carry their parameters.** A queued job's `response_format` / `tools`
   reach the provider.
-- **Tests:** `uv run pytest tests/` — 124 tests, ~1.5s, and the suite now *enforces*
+- **Tests:** `uv run pytest tests/` — 170 tests, ~1.5s, and the suite now *enforces*
   no network: a connect to anything but loopback fails with a pointer to
   `tests/fixtures/`.
 - **The live gate:** `bash scripts/agent_gate.sh` — nexus `callStructured` (three
@@ -50,20 +50,17 @@ Current state only. Rewritten in place, never appended. History lives in `CHANGE
 
 ## In progress
 
-- Branch **`sprint/agent-ready`** — 9 commits ahead of `master`, unmerged, unpushed.
-  It executes `plans/SPRINT-agent-ready.md`; every ticket is done except the deploy.
+- Branch **`sprint/agent-ready`** — unmerged. It executes
+  `plans/SPRINT-agent-ready.md`; every code ticket is done. Publishing it for
+  review does not deploy it.
 
 ## Known broken
 
-- **Still not deployed, and the deploy is one command away.** `deploy/` holds the
+- **Still not deployed.** `deploy/` holds the
   launchd plists, an idempotent installer and the runbook; `/health` asserts a
   database round-trip and a live adapter; `scripts/heartbeat.sh` is a dedicated
-  job. What is missing is getting this branch onto agent-mini, which needs a push:
-
-      git push ssh://agent/Users/ding/projects/llm-router sprint/agent-ready
-      ssh agent 'cd ~/projects/llm-router && git checkout sprint/agent-ready && uv sync'
-      ssh agent 'echo "API_KEY=$(openssl rand -hex 24)" >> ~/projects/llm-router/.env'
-      ssh agent 'cd ~/projects/llm-router && bash deploy/install.sh'
+  job. Deployment remains a separate security-sensitive operation after review;
+  follow `deploy/README.md` rather than treating a pushed branch as a release.
 
   agent-mini's uncommitted pre-switch state is saved at
   `~/llm-router-preswitch-20260819.patch`.
